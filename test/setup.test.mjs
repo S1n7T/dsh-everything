@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import {
   buildSetupSilentArgs,
   buildWingetInstallArgs,
+  compareVersions,
+  parseDownloadsPage,
   parseProxyFromRegOutput,
   resolveInstallDir,
   resolveProxy,
@@ -87,5 +89,46 @@ describe('PINS', () => {
       assert.match(pin.sha256, /^[0-9a-f]{64}$/);
       assert.ok(pin.bytes > 0);
     }
+  });
+});
+
+describe('compareVersions', () => {
+  it('compares dotted versions numerically', () => {
+    assert.ok(compareVersions('1.4.1', '1.10.0') < 0);
+    assert.ok(compareVersions('1.1.0.38', '1.1.0.37') > 0);
+    assert.equal(compareVersions('1.4.1.1032', '1.4.1.1032'), 0);
+  });
+});
+
+describe('parseDownloadsPage', () => {
+  // Mirrors the real voidtools.com/downloads/ link layout (2026-10-26).
+  const PAGE = [
+    '<a href="/ES-1.1.0.38.x64.zip">x64</a>',
+    '<a href="/ES-1.1.0.38.x86.zip">x86</a>',
+    '<a href="/ES-1.1.0.38.ARM64.zip">ARM64</a>',
+    '<a href="/ES-1.1.0.37.x64.zip">older</a>',
+    '<a href="/Everything-1.4.1.1032.x64-Setup.exe">stable</a>',
+    '<a href="/Everything-1.4.1.1032.x64.en-US-Setup.exe">en-US</a>',
+    '<a href="/Everything-1.4.1.1032.x64.Lite-Setup.exe">lite</a>',
+    '<a href="/Everything-1.4.1.1032.x86-Setup.exe">x86</a>',
+    '<a href="/Everything-1.5.0.1424b.x64-Setup.exe">beta</a>',
+  ].join('\n');
+
+  it('picks the latest stable x64 ES CLI, skipping other arches and older versions', () => {
+    assert.deepEqual(parseDownloadsPage(PAGE).es, {
+      version: '1.1.0.38',
+      url: 'https://www.voidtools.com/ES-1.1.0.38.x64.zip',
+    });
+  });
+  it('picks the latest stable multilingual x64 Everything setup, skipping beta/lite/en-US', () => {
+    assert.deepEqual(parseDownloadsPage(PAGE).everything, {
+      version: '1.4.1.1032',
+      url: 'https://www.voidtools.com/Everything-1.4.1.1032.x64-Setup.exe',
+    });
+  });
+  it('returns nulls on empty or unrecognizable input', () => {
+    assert.deepEqual(parseDownloadsPage(''), { es: null, everything: null });
+    assert.deepEqual(parseDownloadsPage('<html>nothing here</html>'), { es: null, everything: null });
+    assert.deepEqual(parseDownloadsPage(null), { es: null, everything: null });
   });
 });

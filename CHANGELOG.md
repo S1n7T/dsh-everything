@@ -3,6 +3,22 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0] - 2026-10-26
+
+### Changed
+- Auto-install now resolves the **latest stable** version from the
+  voidtools.com downloads page instead of installing a pinned version; the
+  recorded known-good releases remain as SHA256-verified fallbacks when the
+  page is unreachable.
+- Downloads try a **direct connection first**; a configured or system proxy
+  is only a fallback, so machines without proxy tools (or with a stale
+  proxy setting) install reliably.
+
+### Added
+- Newer-than-pinned upstream releases are verified by their voidtools
+  Authenticode signature (with a raw .NET certificate-chain fallback when
+  `Get-AuthenticodeSignature`'s module fails to load).
+
 ## [1.1.0] - 2026-10-26
 
 ### Added

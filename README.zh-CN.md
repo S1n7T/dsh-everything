@@ -15,11 +15,11 @@
 
 `autoInstall: true`（默认）时，插件在检测到后端缺失后会自行准备环境：
 
-1. 从 voidtools.com 下载**钉版**的 ES CLI 压缩包，对照 [`setup.js`](setup.js) 中记录的 SHA256 校验后，把 `es.exe` 解压到 `%LOCALAPPDATA%\dsh-everything\bin`（用户目录，无需管理员）。
-2. 优先用 `winget install voidtools.Everything` 安装 **Everything**；没有 winget 时下载官方静默安装包运行——两种方式都可能弹**一次 UAC 授权框**。
+1. 从 voidtools.com 下载页解析**最新稳定版** ES CLI，下载压缩包并把 `es.exe` 解压到 `%LOCALAPPDATA%\dsh-everything\bin`（用户目录，无需管理员）。
+2. 优先用 `winget install voidtools.Everything` 安装 **Everything**；没有 winget 时下载最新稳定版官方安装包静默运行——两种方式都可能弹**一次 UAC 授权框**。
 3. 启动 Everything 并等待其 IPC 就绪后才执行搜索。
 
-下载均钉死具体版本（ES 1.1.0.37、Everything 1.4.1.1032），哈希不匹配会直接中止安装。代理：优先读 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量，否则走 Windows 系统代理。
+下载**始终直连优先**——无需任何代理工具，系统代理设置残留也不会影响安装；代理（`HTTPS_PROXY`/`HTTP_PROXY` 环境变量或 Windows 系统代理）只作为兜底。完整性校验：解析到的版本与 [`setup.js`](setup.js) 记录的已知良好版本一致时做 SHA256 校验；更新的上游版本改验 **voidtools 数字签名**；下载页不可达时回退到已知良好版本（SHA256 校验）。校验失败一律中止安装。
 
 想完全自己装后端，可设 `autoInstall: false`：
 

@@ -15,11 +15,11 @@ Instead of recursively scanning directories (glob) when the model needs to locat
 
 With `autoInstall: true` (the default), the plugin provisions the backend by itself when it is missing:
 
-1. Downloads the pinned **ES CLI** zip from voidtools.com, verifies its SHA256 against a pin recorded in [`setup.js`](setup.js), and extracts `es.exe` to `%LOCALAPPDATA%\dsh-everything\bin` (per-user, no admin).
-2. Installs **Everything** via `winget install voidtools.Everything` when winget is available, otherwise downloads and runs the official silent setup — either path may show **one UAC prompt**.
+1. Resolves the **latest stable** ES CLI from the voidtools.com downloads page, downloads the zip, and extracts `es.exe` to `%LOCALAPPDATA%\dsh-everything\bin` (per-user, no admin).
+2. Installs **Everything** via `winget install voidtools.Everything` when winget is available, otherwise downloads the latest stable official setup and runs it silently — either path may show **one UAC prompt**.
 3. Launches Everything and waits for its IPC before searching.
 
-Downloads are pinned to exact versions (ES 1.1.0.37, Everything 1.4.1.1032) and fail closed on any hash mismatch. Proxies are honored via the `HTTPS_PROXY`/`HTTP_PROXY` environment variables or the Windows system proxy.
+Downloads always go **direct first** — no proxy is needed, and a stale system-proxy setting can never break the install. A proxy (`HTTPS_PROXY`/`HTTP_PROXY` env, or the Windows system proxy) is only used as a fallback. Integrity: when the resolved version matches the known-good release recorded in [`setup.js`](setup.js), the download is SHA256-verified; a newer upstream release is verified by its **voidtools Authenticode signature** instead. If the downloads page is unreachable, the recorded known-good release (SHA256-verified) is used. Installs fail closed when verification fails.
 
 Set `autoInstall: false` if you prefer to install the backend yourself:
 

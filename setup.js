@@ -3,10 +3,17 @@
  * (Everything 1.4 + the ES command line tool) on first use, so the tool works
  * on a fresh Windows machine without manual setup.
  *
- * Supply-chain posture: both downloads are pinned to an exact upstream version
- * and verified against a SHA256 recorded in this file (captured from the
- * official voidtools.com downloads on 2026-10-26; voidtools does not publish
- * hashes, so the pin is the trust anchor). A mismatch aborts the install.
+ * Supply-chain posture: the latest stable version is resolved from the
+ * official voidtools.com downloads page at install time. When it matches the
+ * known-good release recorded in PINS, the download is SHA256-verified against
+ * the recorded digest; otherwise (a newer upstream release, or the page being
+ * unreachable and the pin used as fallback) the voidtools Authenticode
+ * signature on the downloaded binary is verified instead. Both checks failing
+ * aborts the install.
+ *
+ * Networking: direct download is always tried first (most users have no
+ * proxy); a configured or Windows system proxy is only a fallback, and a stale
+ * registry proxy can never break a machine that works direct.
  *
  * What lands where:
  *   - es.exe is extracted under %LOCALAPPDATA%\dsh-everything\bin (per-user, no admin).
@@ -28,6 +35,13 @@ export class EverythingError extends Error {
   }
 }
 
+/**
+ * Known-good releases recorded from the official voidtools.com downloads on
+ * 2026-10-26 (voidtools does not publish hashes; these digests were computed
+ * from the live downloads). Used as the fallback when the downloads page
+ * cannot be reached, and as the SHA256 trust anchor when the resolved latest
+ * version matches one of them.
+ */
 export const PINS = {
   es: {
     version: '1.1.0.37',
@@ -42,6 +56,10 @@ export const PINS = {
     bytes: 1998736,
   },
 };
+
+const DOWNLOADS_PAGE = 'https://www.voidtools.com/downloads/';
+const VOIDTOOLS_ORIGIN = 'https://www.voidtools.com';
+const SIGNER_MATCH = /CN=voidtools/i;
 
 const EVERYTHING_INSTALL_CANDIDATES = [
   'C:\\Program Files\\Everything\\Everything.exe',
@@ -105,6 +123,66 @@ export async function detectSystemProxy() {
   }
 }
 
+/** Compare dotted numeric versions: compareVersions('1.4.1', '1.10.0') < 0. */
+export function compareVersions(a, b) {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/**
+ * Parse the voidtools.com downloads page into the latest STABLE x64 artifact
+ * for each kind. Beta versions (a letter suffix like 1.5.0.1424b) and
+ * non-default flavors (en-US, Lite, x86, ARM) are excluded. Returns
+ * { es: {version,url}|null, everything: {version,url}|null }.
+ */
+export function parseDownloadsPage(html) {
+  if (typeof html !== 'string' || html.length === 0) return { es: null, everything: null };
+  const pick = (pattern) => {
+    let best = null;
+    for (const match of html.matchAll(pattern)) {
+      const version = match[1];
+      if (!best || compareVersions(version, best.version) > 0) {
+        best = { version, url: `${VOIDTOOLS_ORIGIN}${match[0].startsWith('/') ? match[0] : `/${match[0]}`}` };
+      }
+    }
+    return best;
+  };
+  return {
+    es: pick(/ES-(\d+(?:\.\d+)+)\.x64\.zip/g),
+    everything: pick(/Everything-(\d+(?:\.\d+)+)\.x64-Setup\.exe/g),
+  };
+}
+
+/**
+ * Resolve the download artifact for a kind ('es' | 'everything'): scrape the
+ * downloads page for the latest stable release, falling back to the recorded
+ * known-good pin when the page is unreachable or unparsable. The returned
+ * sha256 is set only when the resolved version matches the known-good pin;
+ * callers must then verify the Authenticode signature instead.
+ */
+export async function resolveArtifact(kind, { proxy, log } = {}) {
+  try {
+    const html = await fetchText(DOWNLOADS_PAGE, { proxy });
+    const parsed = parseDownloadsPage(html);
+    const latest = parsed[kind];
+    if (latest) {
+      const pin = PINS[kind];
+      const sha256 = latest.version === pin.version ? pin.sha256 : null;
+      if (!sha256) log?.info?.(`everything_search setup: upstream ${kind} is now ${latest.version} (newer than the recorded ${pin.version}); will verify its voidtools signature instead of a hash.`);
+      return { ...latest, sha256 };
+    }
+    log?.warn?.(`everything_search setup: could not find a ${kind} download on the downloads page; using the recorded known-good release ${PINS[kind].version}.`);
+  } catch (error) {
+    log?.warn?.(`everything_search setup: downloads page unreachable (${error?.message ?? error}); using the recorded known-good release ${PINS[kind].version}.`);
+  }
+  return { version: PINS[kind].version, url: PINS[kind].url, sha256: PINS[kind].sha256 };
+}
+
 export function buildWingetInstallArgs() {
   return [
     'install',
@@ -140,14 +218,100 @@ export async function sha256File(path) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-async function verifyPin(file, pin, label) {
+async function verifyHash(file, sha256, label) {
   const digest = await sha256File(file);
-  if (digest !== pin.sha256) {
+  if (digest !== sha256) {
     throw new EverythingError(
-      `everything_search setup: ${label} download failed integrity check (expected sha256 ${pin.sha256}, got ${digest}); aborting install. Download ${pin.url} manually and point the plugin at it.`,
+      `everything_search setup: ${label} download failed integrity check (expected sha256 ${sha256}, got ${digest}); aborting install.`,
       'ES_SETUP_FAILED'
     );
   }
+}
+
+/**
+ * Verify the Authenticode signature of a downloaded binary: must be Valid and
+ * signed by voidtools. Used for upstream releases newer than the recorded
+ * known-good pin, where no SHA256 anchor exists.
+ */
+export async function verifySignature(file, label) {
+  // Get-AuthenticodeSignature first; if its module fails to load (polluted
+  // PSModulePath can break 5.1 type-data loading), fall back to raw .NET:
+  // extract the signing cert and build a chain to a trusted root offline.
+  const script = [
+    `$f = '${file.replace(/'/g, "''")}'`,
+    `$sig = $null`,
+    `try { $sig = Get-AuthenticodeSignature -LiteralPath $f -ErrorAction Stop } catch {}`,
+    `if ($sig -and $sig.Status -eq 'Valid' -and $sig.SignerCertificate -and $sig.SignerCertificate.Subject -match 'CN=voidtools') { 'OK'; exit 0 }`,
+    `try {`,
+    `  $raw = [System.Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($f)`,
+    `  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(, $raw)`,
+    `  $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain`,
+    `  $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Offline`,
+    `  $ok = $chain.Build($cert)`,
+    `  "CHAIN=$ok|$($cert.Subject)"`,
+    `} catch { "CHAIN=False|$($_.Exception.Message)" }`,
+  ].join('; ');
+  let out;
+  try {
+    out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 30000);
+  } catch (error) {
+    throw new EverythingError(
+      `everything_search setup: could not verify the signature of ${label}: ${error?.message ?? error}`,
+      'ES_SETUP_FAILED'
+    );
+  }
+  const line = out.trim().split(/\r?\n/).pop() ?? '';
+  if (line === 'OK') return;
+  const m = /^CHAIN=(True|False)\|(.*)$/i.exec(line);
+  if (m && m[1].toLowerCase() === 'true' && SIGNER_MATCH.test(m[2])) return;
+  throw new EverythingError(
+    `everything_search setup: ${label} failed signature verification (${line || 'no output'}; expected a valid voidtools signature); aborting install.`,
+    'ES_SETUP_FAILED'
+  );
+}
+
+async function fetchTextViaFetch(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetch a text resource (the downloads page) with the same posture as
+ * downloadFile: direct first, proxy only as a fallback.
+ */
+export async function fetchText(url, { timeoutMs = 60000, proxy } = {}) {
+  if (proxy === undefined) proxy = resolveProxy() ?? (await detectSystemProxy());
+  const attempts = [
+    ['fetch', () => fetchTextViaFetch(url, timeoutMs)],
+    ['curl', async () => run('curl.exe', ['-fsSL', '--max-time', String(Math.ceil(timeoutMs / 1000)), url], timeoutMs + 15000)],
+  ];
+  if (proxy) {
+    attempts.push(['curl-proxy', async () => run('curl.exe', ['-fsSL', '--max-time', String(Math.ceil(timeoutMs / 1000)), '--proxy', proxy, url], timeoutMs + 15000)]);
+  }
+  attempts.push([
+    'powershell',
+    async () => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Invoke-WebRequest -Uri '${url.replace(/'/g, "''")}' -UseBasicParsing -Headers @{ 'User-Agent' = 'Mozilla/5.0' }).Content`], timeoutMs + 15000),
+  ]);
+  let lastError = null;
+  for (const [, fn] of attempts) {
+    try {
+      const text = await fn();
+      if (typeof text === 'string' && text.length > 0) return text;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new EverythingError(
+    `everything_search setup: could not fetch ${url}: ${lastError?.message ?? lastError}`,
+    lastError instanceof EverythingError ? lastError.code : 'ES_SETUP_FAILED'
+  );
 }
 
 async function downloadViaFetch(url, dest, timeoutMs) {
@@ -190,23 +354,29 @@ async function downloadViaPowerShell(url, dest, timeoutMs) {
 }
 
 /**
- * Download with layered fallbacks: direct fetch → curl.exe (honours the
- * HTTPS_PROXY env or the Windows system proxy) → PowerShell Invoke-WebRequest
- * (always honours the system proxy). Returns the strategy that worked.
+ * Download with layered fallbacks. DIRECT is always tried first (most users
+ * have no proxy, and a stale registry proxy must not break them): fetch →
+ * curl.exe direct → curl.exe through the detected proxy (only when one is
+ * configured) → PowerShell Invoke-WebRequest (honours the system proxy).
+ * When sha256 is given the file is hash-verified. When it is null (a newer
+ * upstream release) no in-band check is possible here — callers must verify
+ * the voidtools Authenticode signature of the resulting binary instead
+ * (archives cannot be Authenticode-signed). Returns the strategy that worked.
  */
-export async function downloadFile(url, dest, { timeoutMs = DOWNLOAD_TIMEOUT_MS, proxy, pin = null, label = 'file' } = {}) {
+export async function downloadFile(url, dest, { timeoutMs = DOWNLOAD_TIMEOUT_MS, proxy, sha256 = null, label = 'file' } = {}) {
   if (proxy === undefined) proxy = resolveProxy() ?? (await detectSystemProxy());
   mkdirSync(win32path.dirname(dest), { recursive: true });
   const attempts = [
     ['fetch', () => downloadViaFetch(url, dest, timeoutMs)],
-    ['curl', () => downloadViaCurl(url, dest, timeoutMs, proxy)],
-    ['powershell', () => downloadViaPowerShell(url, dest, timeoutMs)],
+    ['curl', () => downloadViaCurl(url, dest, timeoutMs, null)],
   ];
+  if (proxy) attempts.push(['curl-proxy', () => downloadViaCurl(url, dest, timeoutMs, proxy)]);
+  attempts.push(['powershell', () => downloadViaPowerShell(url, dest, timeoutMs)]);
   let lastError = null;
   for (const [name, fn] of attempts) {
     try {
       await fn();
-      if (pin) await verifyPin(dest, pin, label);
+      if (sha256) await verifyHash(dest, sha256, label);
       return name;
     } catch (error) {
       lastError = error;
@@ -245,9 +415,13 @@ async function installEverything(installDir, log, proxy) {
   } catch (error) {
     log?.warn?.(`everything_search: winget install failed (${error?.message ?? error}); falling back to the official setup.`);
   }
-  // Strategy 2: pinned official NSIS setup, silent. One UAC prompt.
-  const setupExe = win32path.join(installDir, 'dl', 'Everything-Setup.exe');
-  await downloadFile(PINS.everything.url, setupExe, { proxy, pin: PINS.everything, label: 'Everything setup' });
+  // Strategy 2: latest official NSIS setup (resolved from the downloads
+  // page), silent. One UAC prompt.
+  const artifact = await resolveArtifact('everything', { proxy, log });
+  const setupExe = win32path.join(installDir, 'dl', `Everything-${artifact.version}.x64-Setup.exe`);
+  log?.info?.(`everything_search: downloading the official Everything ${artifact.version} setup…`);
+  await downloadFile(artifact.url, setupExe, { proxy, sha256: artifact.sha256, label: 'Everything setup' });
+  if (!artifact.sha256) await verifySignature(setupExe, 'Everything setup');
   log?.info?.('everything_search: running the official Everything setup silently (a UAC prompt may appear)…');
   await run(setupExe, buildSetupSilentArgs(), SETUP_TIMEOUT_MS);
   const found = findEverythingInstall();
@@ -263,11 +437,13 @@ async function installEverything(installDir, log, proxy) {
 async function provisionEs(installDir, log, proxy) {
   const binDir = win32path.join(installDir, 'bin');
   mkdirSync(binDir, { recursive: true });
+  const artifact = await resolveArtifact('es', { proxy, log });
   const zipPath = win32path.join(installDir, 'dl', 'es.zip');
-  log?.info?.(`everything_search: downloading ES CLI ${PINS.es.version}…`);
-  await downloadFile(PINS.es.url, zipPath, { proxy, pin: PINS.es, label: 'ES CLI' });
+  log?.info?.(`everything_search: downloading ES CLI ${artifact.version}…`);
+  await downloadFile(artifact.url, zipPath, { proxy, sha256: artifact.sha256, label: 'ES CLI' });
   await expandZip(zipPath, binDir);
   const esPath = win32path.join(binDir, 'es.exe');
+  if (!artifact.sha256) await verifySignature(esPath, 'ES CLI');
   if (!existsSync(esPath)) {
     throw new EverythingError('everything_search setup: es.exe missing after extracting the ES archive.', 'ES_SETUP_FAILED');
   }
