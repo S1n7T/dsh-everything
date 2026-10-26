@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { apply } from '../index.js';
 
 const ES_CANDIDATES = [
@@ -23,11 +23,14 @@ const skip = process.platform !== 'win32' || esPath === undefined
   ? 'requires Windows with es.exe installed (set ES_PATH to override detection)'
   : false;
 
+// First-run index builds can take a while on a cold machine; give spawns room.
 function loadTool(config = {}) {
   let registered = null;
-  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath, autoStart: true, ...config });
+  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath, autoStart: true, autoInstall: false, timeoutMs: 30000, ...config });
   return registered;
 }
+
+const everythingDir = esPath === undefined ? null : dirname(esPath);
 
 test('finds a uniquely named file through the real index', { skip, timeout: 60000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-everything-'));
@@ -51,14 +54,16 @@ test('finds a uniquely named file through the real index', { skip, timeout: 6000
 
 test('path scoping and maxResults are honored', { skip, timeout: 60000 }, async () => {
   const tool = loadTool();
-  const value = await tool.execute({ query: '*', path: 'D:\\Everything', maxResults: 3 });
+  const value = await tool.execute({ query: 'es.exe', path: everythingDir, maxResults: 3 });
   assert.ok(value.results.length <= 3);
-  assert.ok(value.results.every((r) => r.path.startsWith('D:\\Everything')));
+  assert.ok(value.results.every((r) => r.path.startsWith(everythingDir)));
+  assert.ok(value.results.length > 0, `expected es.exe under ${everythingDir}`);
   assert.equal(typeof value.total, 'number');
 });
 
 test('regex search matches full paths', { skip, timeout: 60000 }, async () => {
   const tool = loadTool();
-  const value = await tool.execute({ query: '^D:\\\\Everything\\\\es\\.exe$', regex: true, matchCase: false });
-  assert.ok(value.results.some((r) => r.path === 'D:\\Everything\\es.exe'));
+  const escaped = esPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const value = await tool.execute({ query: `^${escaped}$`, regex: true, matchCase: false });
+  assert.ok(value.results.some((r) => r.path.toLowerCase() === esPath.toLowerCase()));
 });

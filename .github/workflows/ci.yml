@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test test/unit.test.mjs
+      - run: node --test test/unit.test.mjs test/setup.test.mjs
 
   integration:
     runs-on: windows-latest
@@ -34,7 +34,18 @@ jobs:
       - name: Start Everything and wait for indexing
         shell: pwsh
         run: |
+          $es = "C:\Program Files\Everything\es.exe"
           Start-Process "C:\Program Files\Everything\Everything.exe"
-          Start-Sleep -Seconds 20
+          # First-run index build can take minutes on a cold runner; a query
+          # blocks until the database is ready. Poll until es.exe answers.
+          $deadline = (Get-Date).AddMinutes(5)
+          do {
+            & $es -n 1 "Everything.exe" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 5
+          } while ((Get-Date) -lt $deadline)
+          if ($LASTEXITCODE -ne 0) { throw "es.exe never answered; indexing did not finish" }
       - name: Run integration tests
         run: node --test test/integration.test.mjs
+        env:
+          ES_PATH: C:\Program Files\Everything\es.exe

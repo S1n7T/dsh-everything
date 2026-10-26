@@ -77,12 +77,16 @@ function runEs(esPath, argv, timeoutMs, signal) {
           const stderrText = typeof stderr === 'string' ? stderr.trim() : '';
           if (error) {
             const detail = `${stderrText} ${error.message ?? ''}`;
-            if (error.signal === 'SIGTERM' || /abort/i.test(error.message ?? '')) {
+            if (signal?.aborted) {
               reject(new EverythingError('everything_search: the call was aborted (tool timeout or caller cancellation).', 'ES_ABORTED'));
               return;
             }
             if (error.killed || /timed out/i.test(error.message ?? '')) {
-              reject(new EverythingError(`everything_search: es.exe timed out after ${timeoutMs}ms; narrow the query and retry.`, 'ES_TIMEOUT'));
+              reject(new EverythingError(`everything_search: es.exe timed out after ${timeoutMs}ms; the index may still be building on first run — retry shortly, or narrow the query.`, 'ES_TIMEOUT'));
+              return;
+            }
+            if (error.signal === 'SIGTERM' || /abort/i.test(error.message ?? '')) {
+              reject(new EverythingError('everything_search: the call was aborted (tool timeout or caller cancellation).', 'ES_ABORTED'));
               return;
             }
             if (/ENOENT/.test(detail)) {
