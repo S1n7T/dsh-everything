@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Everything Search",
+    "description": "Adds an everything_search tool that locates files and folders across all indexed drives in milliseconds through the local Everything (voidtools) index."
+  }
+}

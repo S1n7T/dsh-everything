@@ -1,0 +1,24 @@
+{
+  "name": "dsh-everything",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness plugin: millisecond whole-disk file search for agents via the local Everything (voidtools) index",
+  "keywords": ["dsh", "deepseek-harness", "everything", "voidtools", "file-search", "agent-tool"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/S1n7T/dsh-everything.git" },
+  "bugs": "https://github.com/S1n7T/dsh-everything/issues",
+  "homepage": "https://github.com/S1n7T/dsh-everything#readme",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

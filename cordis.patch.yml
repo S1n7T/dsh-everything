@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-everything
+      name: 'dsh-everything'
+      config:
+        autoStart: true
+        maxResults: 100
+        timeoutMs: 8000

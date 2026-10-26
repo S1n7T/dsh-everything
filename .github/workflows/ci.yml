@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test test/unit.test.mjs
+
+  integration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Everything
+        shell: pwsh
+        run: |
+          winget install --id voidtools.Everything --source winget --accept-source-agreements --accept-package-agreements --silent
+      - name: Install ES CLI (es.exe)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://www.voidtools.com/ES-1.1.0.37.x64.zip -OutFile ES.zip -UseBasicParsing
+          Expand-Archive ES.zip -DestinationPath "C:\Program Files\Everything" -Force
+      - name: Start Everything and wait for indexing
+        shell: pwsh
+        run: |
+          Start-Process "C:\Program Files\Everything\Everything.exe"
+          Start-Sleep -Seconds 20
+      - name: Run integration tests
+        run: node --test test/integration.test.mjs
