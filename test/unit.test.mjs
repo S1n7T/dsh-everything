@@ -114,7 +114,9 @@ test('apply: registers one tool named everything_search', () => {
 test('apply: empty query is rejected before any spawn', async () => {
   let registered = null;
   apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\Everything\\es.exe', autoInstall: false });
-  await assert.rejects(() => registered.execute({ query: '   ' }), (e) => e instanceof EverythingError && e.code === 'ES_INVALID_ARGS');
+  // On non-Windows the platform stub answers before argument validation runs.
+  const expectedCode = process.platform === 'win32' ? 'ES_INVALID_ARGS' : 'ES_UNSUPPORTED_PLATFORM';
+  await assert.rejects(() => registered.execute({ query: '   ' }), (e) => e instanceof EverythingError && e.code === expectedCode);
 });
 
 test('apply: missing es.exe yields ES_NOT_FOUND', { skip: process.platform !== 'win32' }, async () => {

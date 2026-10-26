@@ -43,7 +43,9 @@ test('finds a uniquely named file through the real index', { skip, timeout: 6000
   let lastValue;
   for (let i = 0; i < 15 && found === null; i += 1) {
     lastValue = await tool.execute({ query: unique });
-    found = lastValue.results.find((r) => r.path.toLowerCase() === filePath.toLowerCase()) ?? null;
+    // Everything reports the long form of paths; TMPDIR may be an 8.3 short
+    // name (e.g. RUNNER~1 on CI), so match on the unique file name.
+    found = lastValue.results.find((r) => r.path.toLowerCase().endsWith(`\\${unique.toLowerCase()}`)) ?? null;
     if (found === null) await new Promise((r) => setTimeout(r, 1000));
   }
   assert.ok(found, `expected ${filePath} in results; last value: ${JSON.stringify(lastValue)}`);
