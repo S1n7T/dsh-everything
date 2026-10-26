@@ -9,21 +9,25 @@
  * a clear platform message instead of a confusing spawn error.
  *
  * Config (set in cordis.patch.yml):
- *   esPath         absolute path to es.exe (default: well-known locations, then PATH)
- *   everythingPath absolute path to Everything.exe (default: sibling of esPath)
+ *   esPath         absolute path to es.exe (default: well-known locations, then auto-install)
+ *   everythingPath absolute path to Everything.exe (default: sibling of esPath / standard locations)
  *   autoStart      launch Everything.exe when the index is not running (default: true)
+ *   autoInstall    download & install Everything + ES CLI when missing (default: true)
+ *   installDir     where the auto-installed ES CLI lives (default: %LOCALAPPDATA%\dsh-everything)
  *   maxResults     default per-call result cap (default: 100, ceiling: 1000)
  *   timeoutMs      per-spawn timeout in milliseconds (default: 8000)
  */
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { win32 as win32path } from 'node:path';
+import { ensureBackend, EverythingError } from './setup.js';
 
 const DEFAULT_MAX_RESULTS = 100;
 const DEFAULT_TIMEOUT_MS = 8000;
 const MAX_RESULTS_CEILING = 1000;
 const MAX_BUFFER = 32 * 1024 * 1024;
 const AUTOSTART_WAIT_MS = 15000;
+const SETUP_BUDGET_MS = 240000;
 
 /** Fallback candidates when the patch config does not pin `esPath`. */
 const ES_CANDIDATES = [
@@ -34,13 +38,7 @@ const ES_CANDIDATES = [
 
 const SORT_NAME_RE = /^[a-z][a-z0-9-]*(-(ascending|descending))?$/i;
 
-export class EverythingError extends Error {
-  constructor(message, code) {
-    super(message);
-    this.name = 'EverythingError';
-    this.code = code;
-  }
-}
+export { EverythingError };
 
 function clampInt(value, min, max, fallback) {
   const n = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : NaN;
@@ -55,14 +53,14 @@ function resolveEsPath(config) {
   for (const candidate of ES_CANDIDATES) {
     if (existsSync(candidate)) return candidate;
   }
-  return 'es.exe'; // last resort: PATH lookup
+  return null; // nothing found — auto-install or PATH fallback decides
 }
 
 function resolveEverythingPath(config, esPath) {
   if (config && typeof config.everythingPath === 'string' && config.everythingPath.trim().length > 0) {
     return config.everythingPath.trim();
   }
-  if (/es\.exe$/i.test(esPath)) return win32path.join(win32path.dirname(esPath), 'Everything.exe');
+  if (typeof esPath === 'string' && /es\.exe$/i.test(esPath)) return win32path.join(win32path.dirname(esPath), 'Everything.exe');
   return 'Everything.exe';
 }
 
@@ -317,18 +315,65 @@ export function apply(ctx, config = {}) {
     return;
   }
 
-  const esPath = resolveEsPath(config);
-  const everythingPath = resolveEverythingPath(config, esPath);
   const autoStart = config.autoStart !== false;
+  const autoInstall = config.autoInstall !== false;
   const maxResults = clampInt(config.maxResults, 1, MAX_RESULTS_CEILING, DEFAULT_MAX_RESULTS);
   const timeoutMs = clampInt(config.timeoutMs, 1000, 60000, DEFAULT_TIMEOUT_MS);
+
+  // Mutable: auto-install may re-resolve both paths after provisioning.
+  let esPath = resolveEsPath(config);
+  let everythingPath = resolveEverythingPath(config, esPath ?? 'es.exe');
+
+  /**
+   * One shared provisioning run. Rejects clear the cache so the next call can
+   * retry (e.g. after the user approves a UAC prompt on a second attempt).
+   */
+  let setupPromise = null;
+  function ensureReady() {
+    if (!setupPromise) {
+      setupPromise = ensureBackend({
+        config,
+        log: ctx.logger,
+        probe: async (es, evPath) => {
+          try {
+            await runEs(esPath, ['-get-everything-version'], 3000);
+          } catch (error) {
+            if (error instanceof EverythingError && error.code === 'ES_NOT_RUNNING' && autoStart && existsSync(evPath)) {
+              await autoStartEverything(evPath, esPath);
+              return;
+            }
+            throw error;
+          }
+        },
+      })
+        .then((result) => {
+          esPath = result.esPath;
+          everythingPath = result.everythingPath;
+          if (result.installed.length > 0) ctx.logger?.info?.(`everything_search: auto-installed ${result.installed.join(', ')} under ${result.installDir}`);
+          return result;
+        })
+        .catch((error) => {
+          setupPromise = null;
+          throw error;
+        });
+    }
+    return setupPromise;
+  }
+
+  // Kick provisioning in the background so the first search usually finds a
+  // ready backend; failures are logged, never thrown from here.
+  if (autoInstall && (!esPath || !existsSync(everythingPath))) {
+    ensureReady().catch((error) => {
+      ctx.logger?.warn?.(`everything_search: auto-install failed (${error?.message ?? error}). Install Everything + ES CLI from https://www.voidtools.com/ or set esPath in the plugin config.`);
+    });
+  }
 
   async function searchOnce(input, query, limit, offset, signal) {
     const flags = buildSearchFlags(input, query);
     const searchArgv = ['-n', String(offset + limit), '-json', '-size', '-dm', '-date-format', '1'];
     if (offset > 0) searchArgv.push('-viewport-offset', String(offset));
     searchArgv.push(...flags);
-    const stdout = await runEs(esPath, searchArgv, timeoutMs, signal);
+    const stdout = await runEs(esPath ?? 'es.exe', searchArgv, timeoutMs, signal);
     return { flags, results: parseResults(stdout) };
   }
 
@@ -344,8 +389,16 @@ export function apply(ctx, config = {}) {
     try {
       search = await searchOnce(input, query, limit, offset, signal);
     } catch (error) {
-      if (!autoStart || !(error instanceof EverythingError) || error.code !== 'ES_NOT_RUNNING') throw error;
-      await autoStartEverything(everythingPath, esPath, signal);
+      if (!(error instanceof EverythingError)) throw error;
+      if (autoInstall && (error.code === 'ES_NOT_FOUND' || (error.code === 'ES_NOT_RUNNING' && !existsSync(everythingPath)))) {
+        // Backend not installed yet — provision (downloads + one possible UAC
+        // prompt), then fall through to the normal start-and-retry path.
+        await ensureReady();
+      }
+      if (!autoStart) throw error;
+      if (error.code === 'ES_NOT_FOUND' && !esPath) throw error;
+      if (error.code !== 'ES_NOT_RUNNING' && error.code !== 'ES_NOT_FOUND') throw error;
+      await autoStartEverything(everythingPath, esPath ?? 'es.exe', signal);
       search = await searchOnce(input, query, limit, offset, signal);
     }
     const { flags, results } = search;
@@ -370,7 +423,7 @@ export function apply(ctx, config = {}) {
     name: 'everything_search',
     description: TOOL_DESCRIPTION,
     parameters: PARAMETERS_SCHEMA,
-    timeoutMs: timeoutMs * 2 + AUTOSTART_WAIT_MS + 5000,
+    timeoutMs: timeoutMs * 2 + AUTOSTART_WAIT_MS + 5000 + (autoInstall ? SETUP_BUDGET_MS : 0),
     isConcurrencySafe: () => true,
     output: {
       schema: OUTPUT_SCHEMA,

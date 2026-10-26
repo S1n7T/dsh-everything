@@ -3,6 +3,18 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] - 2026-10-26
+
+### Added
+- `autoInstall` (default on): when the backend is missing, the plugin
+  downloads the pinned ES CLI (SHA256-verified) into
+  `%LOCALAPPDATA%\dsh-everything\bin` and installs Everything via winget or
+  the official silent setup, then starts it — fresh machines need no manual
+  setup.
+- Proxy-aware downloads: `HTTPS_PROXY`/`HTTP_PROXY` or the Windows system
+  proxy, with fetch → curl.exe → PowerShell fallbacks.
+- New `installDir` config key; new `ES_SETUP_FAILED` error code.
+
 ## [1.0.0] - 2026-10-26
 
 ### Added

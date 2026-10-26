@@ -104,7 +104,7 @@ test('presentResult: narrows meta, falls back on malformed input', () => {
 test('apply: registers one tool named everything_search', () => {
   let registered = null;
   const ctx = { tools: { register(def) { registered = def; return () => {}; } } };
-  apply(ctx, { esPath: 'D:\\Everything\\es.exe' });
+  apply(ctx, { esPath: 'D:\\Everything\\es.exe', autoInstall: false });
   assert.equal(registered.name, 'everything_search');
   assert.equal(registered.isConcurrencySafe({}), true);
   assert.deepEqual(registered.parameters.required, ['query']);
@@ -113,12 +113,13 @@ test('apply: registers one tool named everything_search', () => {
 
 test('apply: empty query is rejected before any spawn', async () => {
   let registered = null;
-  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\Everything\\es.exe' });
+  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\Everything\\es.exe', autoInstall: false });
   await assert.rejects(() => registered.execute({ query: '   ' }), (e) => e instanceof EverythingError && e.code === 'ES_INVALID_ARGS');
 });
 
 test('apply: missing es.exe yields ES_NOT_FOUND', { skip: process.platform !== 'win32' }, async () => {
   let registered = null;
-  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\definitely\\missing\\es.exe', autoStart: false });
+  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\definitely\\missing\\es.exe', autoStart: false, autoInstall: false });
   await assert.rejects(() => registered.execute({ query: 'x' }), (e) => e instanceof EverythingError && e.code === 'ES_NOT_FOUND');
 });
+

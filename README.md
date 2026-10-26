@@ -9,16 +9,25 @@ Instead of recursively scanning directories (glob) when the model needs to locat
 ## Requirements
 
 - **Windows** (Everything is a Windows-only application; on other platforms the plugin registers a stub that fails with a clear message)
-- [Everything 1.4+](https://www.voidtools.com/downloads/) installed and running
-- [ES command line tool](https://www.voidtools.com/downloads/) (`es.exe`)
+- [Everything 1.4+](https://www.voidtools.com/downloads/) and the [ES command line tool](https://www.voidtools.com/downloads/) (`es.exe`) — **installed automatically on first use** (see below)
 
-Quick backend setup:
+### Automatic backend setup (default)
+
+With `autoInstall: true` (the default), the plugin provisions the backend by itself when it is missing:
+
+1. Downloads the pinned **ES CLI** zip from voidtools.com, verifies its SHA256 against a pin recorded in [`setup.js`](setup.js), and extracts `es.exe` to `%LOCALAPPDATA%\dsh-everything\bin` (per-user, no admin).
+2. Installs **Everything** via `winget install voidtools.Everything` when winget is available, otherwise downloads and runs the official silent setup — either path may show **one UAC prompt**.
+3. Launches Everything and waits for its IPC before searching.
+
+Downloads are pinned to exact versions (ES 1.1.0.37, Everything 1.4.1.1032) and fail closed on any hash mismatch. Proxies are honored via the `HTTPS_PROXY`/`HTTP_PROXY` environment variables or the Windows system proxy.
+
+Set `autoInstall: false` if you prefer to install the backend yourself:
 
 ```powershell
-winget install --id voidtools.Everything --location "D:\Everything" --silent
+winget install --id voidtools.Everything --silent
 Invoke-WebRequest https://www.voidtools.com/ES-1.1.0.37.x64.zip -OutFile ES.zip
-Expand-Archive ES.zip -DestinationPath "D:\Everything" -Force
-Start-Process "D:\Everything\Everything.exe"
+Expand-Archive ES.zip -DestinationPath "C:\Program Files\Everything" -Force
+Start-Process "C:\Program Files\Everything\Everything.exe"
 ```
 
 ## Installation
@@ -58,6 +67,8 @@ Edit the plugin's `config` in `cordis.patch.yml` (or your profile's patch layer)
 | `esPath` | auto-detect | Absolute path to `es.exe`. |
 | `everythingPath` | sibling of `esPath` | Absolute path to `Everything.exe`, used by autoStart. |
 | `autoStart` | `true` | Launch Everything and wait for its IPC when it is not running. |
+| `autoInstall` | `true` | Download & install Everything + ES CLI when missing (see above). |
+| `installDir` | `%LOCALAPPDATA%\dsh-everything` | Where the auto-installed ES CLI lives. |
 | `maxResults` | `100` | Default per-call result cap. |
 | `timeoutMs` | `8000` | Per-spawn timeout (ms). |
 
@@ -68,7 +79,7 @@ The search scope is **every indexed drive** on the machine, and result paths are
 ## Development
 
 ```bash
-node --test test/          # unit tests (any platform)
+node --test                # unit tests (any platform)
 node --test test/integration.test.mjs   # needs a running Everything (Windows)
 ```
 

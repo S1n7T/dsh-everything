@@ -9,16 +9,25 @@
 ## 环境要求
 
 - **Windows**（Everything 是 Windows 独占应用；其他平台上插件会注册一个明确报错的占位工具）
-- 已安装并运行 [Everything 1.4+](https://www.voidtools.com/zh-cn/downloads/)
-- [ES 命令行工具](https://www.voidtools.com/zh-cn/downloads/)（`es.exe`）
+- [Everything 1.4+](https://www.voidtools.com/zh-cn/downloads/) 与 [ES 命令行工具](https://www.voidtools.com/zh-cn/downloads/)（`es.exe`）——**缺失时插件会自动安装**（见下文）
 
-一键装好后端：
+### 自动安装后端（默认）
+
+`autoInstall: true`（默认）时，插件在检测到后端缺失后会自行准备环境：
+
+1. 从 voidtools.com 下载**钉版**的 ES CLI 压缩包，对照 [`setup.js`](setup.js) 中记录的 SHA256 校验后，把 `es.exe` 解压到 `%LOCALAPPDATA%\dsh-everything\bin`（用户目录，无需管理员）。
+2. 优先用 `winget install voidtools.Everything` 安装 **Everything**；没有 winget 时下载官方静默安装包运行——两种方式都可能弹**一次 UAC 授权框**。
+3. 启动 Everything 并等待其 IPC 就绪后才执行搜索。
+
+下载均钉死具体版本（ES 1.1.0.37、Everything 1.4.1.1032），哈希不匹配会直接中止安装。代理：优先读 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量，否则走 Windows 系统代理。
+
+想完全自己装后端，可设 `autoInstall: false`：
 
 ```powershell
-winget install --id voidtools.Everything --location "D:\Everything" --silent
+winget install --id voidtools.Everything --silent
 Invoke-WebRequest https://www.voidtools.com/ES-1.1.0.37.x64.zip -OutFile ES.zip
-Expand-Archive ES.zip -DestinationPath "D:\Everything" -Force
-Start-Process "D:\Everything\Everything.exe"
+Expand-Archive ES.zip -DestinationPath "C:\Program Files\Everything" -Force
+Start-Process "C:\Program Files\Everything\Everything.exe"
 ```
 
 ## 安装
@@ -58,6 +67,8 @@ plugin_manager install_bundle，target = 本包目录的绝对路径
 | `esPath` | 自动探测 | `es.exe` 的绝对路径。 |
 | `everythingPath` | `esPath` 同目录 | `Everything.exe` 路径，供 autoStart 使用。 |
 | `autoStart` | `true` | Everything 未运行时自动启动并等待其 IPC 就绪。 |
+| `autoInstall` | `true` | 后端缺失时自动下载并安装 Everything + ES CLI（见上文）。 |
+| `installDir` | `%LOCALAPPDATA%\dsh-everything` | 自动安装的 ES CLI 存放目录。 |
 | `maxResults` | `100` | 单次返回条数默认上限。 |
 | `timeoutMs` | `8000` | 单次 spawn 超时（毫秒）。 |
 
@@ -68,7 +79,7 @@ plugin_manager install_bundle，target = 本包目录的绝对路径
 ## 开发
 
 ```bash
-node --test test/          # 单元测试（任意平台）
+node --test                # 单元测试（任意平台）
 node --test test/integration.test.mjs   # 需要运行中的 Everything（Windows）
 ```
 

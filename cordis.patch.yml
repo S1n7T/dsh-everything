@@ -3,5 +3,6 @@
       name: 'dsh-everything'
       config:
         autoStart: true
+        autoInstall: true
         maxResults: 100
         timeoutMs: 8000
