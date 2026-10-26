@@ -37,10 +37,12 @@ Start-Process "C:\Program Files\Everything\Everything.exe"
 In a DSH session, ask the agent or call the plugin manager:
 
 ```
-plugin_manager install_bundle with target = this package directory (or the npm spec once published)
+plugin_manager install_bundle with target = dsh-everything
 ```
 
 The plugin activates as `dsh-everything` and registers the `everything_search` tool for every agent in the profile.
+
+Published on npm as [`dsh-everything`](https://www.npmjs.com/package/dsh-everything); installing from the package directory works too.
 
 ## Tool: `everything_search`
 

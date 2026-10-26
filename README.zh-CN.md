@@ -34,13 +34,13 @@ Start-Process "C:\Program Files\Everything\Everything.exe"
 
 ## 安装
 
-在 DSH 会话中让插件管理器安装本包目录（或发布后的 npm 包名）：
+在 DSH 会话中让插件管理器安装 npm 包名：
 
 ```
-plugin_manager install_bundle，target = 本包目录的绝对路径
+plugin_manager install_bundle，target = dsh-everything
 ```
 
-插件以 `dsh-everything` 激活，并为该 profile 下的所有 Agent 注册 `everything_search` 工具。
+插件以 `dsh-everything` 激活，并为该 profile 下的所有 Agent 注册 `everything_search` 工具。已发布到 npm（[`dsh-everything`](https://www.npmjs.com/package/dsh-everything)），直接用本包目录安装也可以。
 
 ## 工具：everything_search
 
