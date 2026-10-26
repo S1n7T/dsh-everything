@@ -21,6 +21,8 @@
 
 下载**始终直连优先**——无需任何代理工具，系统代理设置残留也不会影响安装；代理（`HTTPS_PROXY`/`HTTP_PROXY` 环境变量或 Windows 系统代理）只作为兜底。完整性校验：解析到的版本与 [`setup.js`](setup.js) 记录的已知良好版本一致时做 SHA256 校验；更新的上游版本改验 **voidtools 数字签名**；下载页不可达时回退到已知良好版本（SHA256 校验）。校验失败一律中止安装。
 
+插件还会保持**自装**的 `es.exe` 不过时：启动时会比对文件版本与插件内置的已知良好版本，落后才升级，且只升级自己装的副本（用户自装的 es.exe 永不动）。
+
 想完全自己装后端，可设 `autoInstall: false`：
 
 ```powershell
@@ -48,15 +50,20 @@ plugin_manager install_bundle，target = 本包目录的绝对路径
 | `path` | string | 限定在某目录及其子目录内（绝对路径）。 |
 | `maxResults` | integer | 返回条数上限（默认 100，封顶 1000）。 |
 | `offset` | integer | 跳过前 N 条（分页）。 |
-| `sort` | string | 排序，如 `date-modified-descending`、`size-descending`、`name-ascending`。 |
+| `sort` | string | 排序，如 `date-modified-descending`、`size-descending`、`name-ascending`。键：`name`、`path`、`size`、`extension`、`date-created`、`date-modified`、`date-accessed`、`run-count`，可加 `-ascending`/`-descending`。 |
 | `regex` | boolean | 把 `query` 当作全路径正则表达式。 |
 | `matchCase` | boolean | 区分大小写（默认不区分）。 |
 | `wholeWord` | boolean | 整词匹配。 |
 | `foldersOnly` / `filesOnly` | boolean | 只看文件夹 / 只看文件。 |
+| `dateCreated` | boolean | 一并返回每个结果的创建时间。 |
+| `countOnly` | boolean | 只返回匹配总数——判断存在性、估量级的最快方式。 |
 
-返回 `{ query, total, truncated, results: [{ path, size, dateModified }] }`，在会话里以搜索路径卡片展示。
+返回 `{ query, total, truncated, results: [{ path, size, dateModified, dateCreated? }] }`，在会话里以搜索路径卡片展示。
+
+典型查询：`report ext:docx` · `*.sln dm:thisweek` · `size:>500mb` · `notes !archive` · 最近改动文件用 `sort: date-modified-descending` + `dm:thisweek`。
 
 > **范围说明**：只搜文件名和路径，不搜文件内容——内容搜索请继续用 `grep`。
+> **覆盖说明**：结果取决于本机 Everything 索引——NTFS/reFS 磁盘与显式加入索引的目录；FAT/exFAT 可移动盘与网络共享通常不在覆盖范围。
 
 ## 配置
 

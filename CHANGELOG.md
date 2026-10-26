@@ -3,6 +3,25 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] - 2026-10-26
+
+### Added
+- `countOnly`: return just the total match count in one round-trip — the
+  fastest way to check existence or estimate volume.
+- `dateCreated`: include each result's creation date.
+- ES CLI self-update: the plugin keeps its **self-installed** `es.exe`
+  current against the pinned known-good release (user-managed installs are
+  never touched).
+- Tool description now documents search syntax quirks and the NTFS/reFS
+  coverage limit (FAT/exFAT and network shares are typically not indexed).
+
+### Fixed
+- The background provisioning probe used the pre-resolution `esPath`
+  (possibly null) instead of the freshly resolved path, which could log a
+  spurious "auto-install failed" warning on auto-installed setups.
+- Backend recovery (auto-install / auto-start retry) now also covers the
+  count-only path, not just the search path.
+
 ## [1.2.0] - 2026-10-26
 
 ### Changed

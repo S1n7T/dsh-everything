@@ -218,6 +218,13 @@ export async function sha256File(path) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
+/** Read the FileVersion resource of a PE file through PowerShell. */
+export async function getExeFileVersion(file) {
+  const script = `(Get-Item -LiteralPath ${JSON.stringify(file)}).VersionInfo.FileVersion`;
+  const stdout = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 15000);
+  return stdout.trim();
+}
+
 async function verifyHash(file, sha256, label) {
   const digest = await sha256File(file);
   if (digest !== sha256) {
@@ -465,6 +472,19 @@ export async function ensureBackend({ config = {}, log = null, proxy, probe = nu
     const provisioned = win32path.join(installDir, 'bin', 'es.exe');
     if (existsSync(provisioned)) {
       esPath = provisioned;
+      // Self-update: our own copy may lag behind the pinned version (e.g. it
+      // was installed by an older plugin release). Only the self-installed
+      // copy is touched — user-managed installs are never upgraded by us.
+      try {
+        const installedVersion = await getExeFileVersion(provisioned);
+        if (installedVersion.length > 0 && compareVersions(installedVersion, PINS.es.version) < 0) {
+          log?.info?.(`everything_search: self-installed ES CLI ${installedVersion} is older than ${PINS.es.version}; upgrading…`);
+          esPath = await provisionEs(installDir, log, proxy);
+          installed.push('es-cli-upgrade');
+        }
+      } catch (error) {
+        log?.warn?.(`everything_search: could not check the ES CLI version (${error?.message ?? error}); keeping the current copy.`);
+      }
     } else {
       esPath = await provisionEs(installDir, log, proxy);
       installed.push('es-cli');

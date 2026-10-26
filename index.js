@@ -186,6 +186,7 @@ function parseResults(stdout) {
     const entry = { path: item.filename };
     if (typeof item.size === 'number') entry.size = item.size;
     if (typeof item.date_modified === 'string') entry.dateModified = item.date_modified;
+    if (typeof item.date_created === 'string') entry.dateCreated = item.date_created;
     results.push(entry);
   }
   return results;
@@ -200,14 +201,18 @@ function formatSize(bytes) {
 
 function renderResults(value) {
   const lines = [];
-  const { query, total, truncated, results } = value;
+  const { query, total, truncated, results, countOnly } = value;
+  if (countOnly) {
+    lines.push(total === 0 ? `Everything "${query}": no matches.` : `Everything "${query}": ${total} match(es) (count only).`);
+    return lines.join('\n');
+  }
   if (results.length === 0) {
     lines.push(`Everything "${query}": no matches.`);
     return lines.join('\n');
   }
   lines.push(`Everything "${query}": ${results.length} of ${total} result(s)${truncated ? ' (truncated, refine the query, raise maxResults, or page with offset)' : ''}:`);
   for (const entry of results) {
-    const meta = [entry.size !== undefined ? formatSize(entry.size) : null, entry.dateModified ?? null]
+    const meta = [entry.size !== undefined ? formatSize(entry.size) : null, entry.dateModified ?? null, entry.dateCreated ? `created ${entry.dateCreated}` : null]
       .filter(Boolean)
       .join(', ');
     lines.push(meta ? `${entry.path}  [${meta}]` : entry.path);
@@ -267,13 +272,21 @@ const PARAMETERS_SCHEMA = {
     wholeWord: { type: 'boolean', description: 'Match whole words only.' },
     foldersOnly: { type: 'boolean', description: 'Return folders only.' },
     filesOnly: { type: 'boolean', description: 'Return files only.' },
+    dateCreated: {
+      type: 'boolean',
+      description: 'Also return the creation date of each result (costs a little extra time per result).',
+    },
+    countOnly: {
+      type: 'boolean',
+      description: 'Return only the total number of matches, without listing paths (fastest way to check existence or estimate volume).',
+    },
   },
   required: ['query'],
   additionalProperties: false,
 };
 
 const TOOL_DESCRIPTION =
-  'Locate files and folders across every indexed drive on this machine through the local Everything (voidtools) index — answers in milliseconds, far faster than glob or a recursive directory scan. Use this FIRST whenever you need to find a file or folder by name, extension, or path, especially outside the workspace. The query uses Everything search syntax: plain words match names, `*`/`?` wildcards, `ext:js;ts` filters extensions, `dm:today` / `dm:thisweek` filter date modified, `size:>10mb` filters size, space means AND, `|` means OR, `!` means NOT, double quotes give an exact phrase. Set regex=true for a full regular expression over the whole path. Returns absolute paths with size and date modified. This searches names and paths only, never file contents — use grep for content.';
+  'Locate files and folders across every indexed drive on this machine through the local Everything (voidtools) index — answers in milliseconds, far faster than glob or a recursive directory scan. Use this FIRST whenever you need to find a file or folder by name, extension, or path, especially outside the workspace. The query uses Everything search syntax, not a glob: plain words match names, `*`/`?` wildcards, `ext:js;ts` filters extensions, `dm:today` / `dm:thisweek` filter date modified, `size:>10mb` filters size, space means AND, `|` means OR, `!` means NOT, double quotes give an exact phrase (avoid combining quoted phrases with modifiers such as ext:). Combine sort="date-modified-descending" with dm:thisweek for recently changed files, or sort="size-descending" to find the biggest ones first. Restrict scope with the dedicated path parameter rather than a path: prefix inside query. Set regex=true for a full regular expression over the whole path, countOnly=true for a fast match count without paths, dateCreated=true to also return creation dates. Returns absolute paths with size and date modified. Names and paths only, never file contents — use grep for content. Coverage follows the local Everything index: NTFS/reFS drives and explicitly added folders; FAT/exFAT removable drives and network shares are typically not indexed.';
 
 const OUTPUT_SCHEMA = {
   type: 'object',
@@ -283,6 +296,7 @@ const OUTPUT_SCHEMA = {
     query: { type: 'string' },
     total: { type: 'integer' },
     truncated: { type: 'boolean' },
+    countOnly: { type: 'boolean' },
     results: {
       type: 'array',
       items: {
@@ -293,6 +307,7 @@ const OUTPUT_SCHEMA = {
           path: { type: 'string' },
           size: { type: 'integer' },
           dateModified: { type: 'string' },
+          dateCreated: { type: 'string' },
         },
       },
     },
@@ -340,10 +355,10 @@ export function apply(ctx, config = {}) {
         log: ctx.logger,
         probe: async (es, evPath) => {
           try {
-            await runEs(esPath, ['-get-everything-version'], 3000);
+            await runEs(es, ['-get-everything-version'], 3000);
           } catch (error) {
             if (error instanceof EverythingError && error.code === 'ES_NOT_RUNNING' && autoStart && existsSync(evPath)) {
-              await autoStartEverything(evPath, esPath);
+              await autoStartEverything(evPath, es);
               return;
             }
             throw error;
@@ -372,26 +387,14 @@ export function apply(ctx, config = {}) {
     });
   }
 
-  async function searchOnce(input, query, limit, offset, signal) {
-    const flags = buildSearchFlags(input, query);
-    const searchArgv = ['-n', String(offset + limit), '-json', '-size', '-dm', '-date-format', '1'];
-    if (offset > 0) searchArgv.push('-viewport-offset', String(offset));
-    searchArgv.push(...flags);
-    const stdout = await runEs(esPath ?? 'es.exe', searchArgv, timeoutMs, signal);
-    return { flags, results: parseResults(stdout) };
-  }
-
-  async function execute(args, exec) {
-    const input = typeof args === 'object' && args !== null ? args : {};
-    const signal = exec?.signal;
-    const query = typeof input.query === 'string' ? input.query.trim() : '';
-    if (query.length === 0) throw new EverythingError('everything_search: "query" must be a non-empty Everything search expression.', 'ES_INVALID_ARGS');
-    const limit = clampInt(input.maxResults, 1, MAX_RESULTS_CEILING, maxResults);
-    const offset = clampInt(input.offset, 0, Number.MAX_SAFE_INTEGER, 0);
-
-    let search;
+  /**
+   * Run one es.exe argv with backend recovery: provision the CLI/Everything
+   * when missing (autoInstall), start Everything when it is not running
+   * (autoStart). Shared by the search path and count-only mode.
+   */
+  async function runEsWithRetry(argv, signal) {
     try {
-      search = await searchOnce(input, query, limit, offset, signal);
+      return await runEs(esPath ?? 'es.exe', argv, timeoutMs, signal);
     } catch (error) {
       if (!(error instanceof EverythingError)) throw error;
       if (autoInstall && (error.code === 'ES_NOT_FOUND' || (error.code === 'ES_NOT_RUNNING' && !existsSync(everythingPath)))) {
@@ -403,9 +406,40 @@ export function apply(ctx, config = {}) {
       if (error.code === 'ES_NOT_FOUND' && !esPath) throw error;
       if (error.code !== 'ES_NOT_RUNNING' && error.code !== 'ES_NOT_FOUND') throw error;
       await autoStartEverything(everythingPath, esPath ?? 'es.exe', signal);
-      search = await searchOnce(input, query, limit, offset, signal);
+      return runEs(esPath ?? 'es.exe', argv, timeoutMs, signal);
     }
-    const { flags, results } = search;
+  }
+
+  async function searchOnce(input, query, limit, offset, signal) {
+    const flags = buildSearchFlags(input, query);
+    const searchArgv = ['-n', String(offset + limit), '-json', '-size', '-dm', '-date-format', '1'];
+    if (input.dateCreated === true) searchArgv.push('-dc');
+    if (offset > 0) searchArgv.push('-viewport-offset', String(offset));
+    searchArgv.push(...flags);
+    const stdout = await runEsWithRetry(searchArgv, signal);
+    return { flags, results: parseResults(stdout) };
+  }
+
+  async function execute(args, exec) {
+    const input = typeof args === 'object' && args !== null ? args : {};
+    const signal = exec?.signal;
+    const query = typeof input.query === 'string' ? input.query.trim() : '';
+    if (query.length === 0) throw new EverythingError('everything_search: "query" must be a non-empty Everything search expression.', 'ES_INVALID_ARGS');
+    const limit = clampInt(input.maxResults, 1, MAX_RESULTS_CEILING, maxResults);
+    const offset = clampInt(input.offset, 0, Number.MAX_SAFE_INTEGER, 0);
+
+    // Count-only mode: one IPC round-trip, no paths listed.
+    if (input.countOnly === true) {
+      const flags = buildSearchFlags(input, query);
+      const countOut = await runEsWithRetry(['-get-result-count', ...flags], signal);
+      const total = Number.parseInt(String(countOut).trim(), 10);
+      if (!Number.isFinite(total) || total < 0) {
+        throw new EverythingError(`everything_search: could not parse the result count ("${countOut}").`, 'ES_PARSE_FAILED');
+      }
+      return { query, total, truncated: false, results: [], countOnly: true };
+    }
+
+    const { flags, results } = await searchOnce(input, query, limit, offset, signal);
 
     // The exact total costs a second IPC round-trip; only fetch it when the
     // page is full and truncation is actually possible.

@@ -61,6 +61,29 @@ test('parseResults: maps es -json rows', () => {
   ]);
 });
 
+test('parseResults: maps date_created when requested', () => {
+  const stdout = '[{"filename":"D:\\\\a\\\\f.txt","date_created":"2026-05-08T17:55:14","date_modified":"2026-05-04T15:09:34"}]';
+  assert.deepEqual(parseResults(stdout), [
+    { path: 'D:\\a\\f.txt', dateModified: '2026-05-04T15:09:34', dateCreated: '2026-05-08T17:55:14' },
+  ]);
+});
+
+test('renderResults: count-only form', () => {
+  const text = renderResults({ query: 'q', total: 1234, truncated: false, results: [], countOnly: true });
+  assert.match(text, /1234 match\(es\) \(count only\)/);
+  assert.doesNotMatch(text, /no matches/);
+});
+
+test('renderResults: dateCreated appears in the meta line', () => {
+  const text = renderResults({
+    query: 'q',
+    total: 1,
+    truncated: false,
+    results: [{ path: 'D:\\a', dateCreated: '2026-05-08T17:55:14' }],
+  });
+  assert.match(text, /created 2026-05-08T17:55:14/);
+});
+
 test('parseResults: empty stdout is an empty list', () => {
   assert.deepEqual(parseResults(''), []);
   assert.deepEqual(parseResults('  \n'), []);

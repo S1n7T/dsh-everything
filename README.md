@@ -21,6 +21,8 @@ With `autoInstall: true` (the default), the plugin provisions the backend by its
 
 Downloads always go **direct first** — no proxy is needed, and a stale system-proxy setting can never break the install. A proxy (`HTTPS_PROXY`/`HTTP_PROXY` env, or the Windows system proxy) is only used as a fallback. Integrity: when the resolved version matches the known-good release recorded in [`setup.js`](setup.js), the download is SHA256-verified; a newer upstream release is verified by its **voidtools Authenticode signature** instead. If the downloads page is unreachable, the recorded known-good release (SHA256-verified) is used. Installs fail closed when verification fails.
 
+The plugin also keeps its **self-installed** copy of `es.exe` current: on startup it compares the file version against the pinned known-good release and upgrades the copy it owns (user-managed installs are never touched).
+
 Set `autoInstall: false` if you prefer to install the backend yourself:
 
 ```powershell
@@ -48,15 +50,20 @@ The plugin activates as `dsh-everything` and registers the `everything_search` t
 | `path` | string | Restrict to a directory and its subtree (absolute path). |
 | `maxResults` | integer | Result cap (default 100, ceiling 1000). |
 | `offset` | integer | Skip leading results (pagination). |
-| `sort` | string | e.g. `date-modified-descending`, `size-descending`, `name-ascending`. |
+| `sort` | string | e.g. `date-modified-descending`, `size-descending`, `name-ascending`. Keys: `name`, `path`, `size`, `extension`, `date-created`, `date-modified`, `date-accessed`, `run-count`, plus `-ascending`/`-descending`. |
 | `regex` | boolean | Treat `query` as a full-path regular expression. |
 | `matchCase` | boolean | Case-sensitive matching (default: insensitive). |
 | `wholeWord` | boolean | Match whole words only. |
 | `foldersOnly` / `filesOnly` | boolean | Restrict result type. |
+| `dateCreated` | boolean | Also return each result's creation date. |
+| `countOnly` | boolean | Return only the total match count — the fastest way to check existence or estimate volume. |
 
-Returns `{ query, total, truncated, results: [{ path, size, dateModified }] }` and renders in the chat as a search-paths card.
+Returns `{ query, total, truncated, results: [{ path, size, dateModified, dateCreated? }] }` and renders in the chat as a search-paths card.
+
+Typical queries: `report ext:docx` · `*.sln dm:thisweek` · `size:>500mb` · `notes !archive` · recently changed files with `sort: date-modified-descending` + `dm:thisweek`.
 
 > **Scope note:** searches names and paths only, never file contents — content search stays with `grep`.
+> **Coverage note:** results follow the local Everything index — NTFS/reFS drives and folders explicitly added to the index. FAT/exFAT removable drives and network shares are typically not covered.
 
 ## Configuration
 
