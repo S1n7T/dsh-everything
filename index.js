@@ -599,6 +599,20 @@ export function apply(ctx, config = {}) {
    * retry (e.g. after the user approves a UAC prompt on a second attempt).
    */
   let setupPromise = null;
+
+  // Serializes es.exe spawns with the one-shot HTTP enable. The enable step
+  // restarts the Everything GUI; on machines where Everything runs as a lone
+  // GUI process (no background service) that kills the IPC endpoint too, so
+  // a query racing the restart window would block on dead IPC until its
+  // timeout. Queries instead queue behind the restart; the restart also
+  // waits for any in-flight query before killing the process.
+  let backendGate = Promise.resolve();
+  function gateBackend(fn) {
+    const run = backendGate.then(fn, fn);
+    backendGate = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   function ensureReady() {
     if (!setupPromise) {
       setupPromise = ensureBackend({
@@ -625,7 +639,7 @@ export function apply(ctx, config = {}) {
           if (httpPort > 0 && httpAutoEnable && !httpSetupDone) {
             httpSetupDone = true;
             try {
-              const r = await ensureHttpServer({ port: httpPort, everythingPath, log: ctx.logger, username: httpUsername, password: httpPassword });
+              const r = await gateBackend(() => ensureHttpServer({ port: httpPort, everythingPath, log: ctx.logger, username: httpUsername, password: httpPassword }));
               if (r.enabled || r.alreadyRunning) {
                 httpState.ready = true;
                 httpState.downUntil = 0; // clear the breaker so the next call uses HTTP
@@ -661,8 +675,9 @@ export function apply(ctx, config = {}) {
    * (autoStart). Shared by the search path and count-only mode.
    */
   async function runEsWithRetry(argv, signal) {
+    const es = () => esPath ?? 'es.exe';
     try {
-      return await runEs(esPath ?? 'es.exe', argv, timeoutMs, signal);
+      return await gateBackend(() => runEs(es(), argv, timeoutMs, signal));
     } catch (error) {
       if (!(error instanceof EverythingError)) throw error;
       if (autoInstall && (error.code === 'ES_NOT_FOUND' || (error.code === 'ES_NOT_RUNNING' && !existsSync(everythingPath)))) {
@@ -673,8 +688,8 @@ export function apply(ctx, config = {}) {
       if (!autoStart) throw error;
       if (error.code === 'ES_NOT_FOUND' && !esPath) throw error;
       if (error.code !== 'ES_NOT_RUNNING' && error.code !== 'ES_NOT_FOUND') throw error;
-      await autoStartEverything(everythingPath, esPath ?? 'es.exe', signal);
-      return runEs(esPath ?? 'es.exe', argv, timeoutMs, signal);
+      await autoStartEverything(everythingPath, es(), signal);
+      return gateBackend(() => runEs(es(), argv, timeoutMs, signal));
     }
   }
 

@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.1] - 2026-10-27
+
+### Fixed
+- A search that started while the one-time HTTP enable was restarting the
+  Everything GUI could block on dead IPC and time out on machines where
+  Everything runs as a lone GUI process (no background service — e.g. CI
+  runners). es.exe spawns and the HTTP enable now share a serialization
+  gate: queries queue behind the restart instead of racing it, and the
+  restart waits for in-flight queries before killing the process.
+
 ## [1.4.0] - 2026-10-27
 
 ### Added
