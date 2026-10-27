@@ -46,7 +46,7 @@ plugin_manager install_bundle，target = dsh-everything
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `query` *（必填）* | string | Everything 搜索表达式：`report ext:docx`、`*.sln dm:thisweek`、`path:\projects\ ext:py`。空格 = 与，`\|` = 或，`!` = 非，双引号 = 精确短语。 |
+| `query` *（必填）* | string | Everything 搜索表达式：`report ext:docx`、`*.sln dm:thisweek`、`path:\projects\ ext:py`。空格 = 与，`\|` = 或，`!` = 非。多词查询会自动拆分为 es.exe 的独立搜索词。 |
 | `path` | string | 限定在某目录及其子目录内（绝对路径）。 |
 | `maxResults` | integer | 返回条数上限（默认 100，封顶 1000）。 |
 | `offset` | integer | 跳过前 N 条（分页）。 |
@@ -61,6 +61,9 @@ plugin_manager install_bundle，target = dsh-everything
 返回 `{ query, total, truncated, results: [{ path, size, dateModified, dateCreated? }] }`，在会话里以搜索路径卡片展示。
 
 典型查询：`report ext:docx` · `*.sln dm:thisweek` · `size:>500mb` · `notes !archive` · 最近改动文件用 `sort: date-modified-descending` + `dm:thisweek`。
+
+> **短语怪癖**：带引号的短语只匹配文件名的“名字部分”，所以 `"report.docx"` 永远搜不到——直接写不带引号的 `report.docx`。含空格的短语无法经 es.exe CLI 表达（会退化为逐词 AND）；需要精确多词匹配请用 `regex=true`。
+> **编码**：结果改从 es.exe 的 UTF-8 `-export-json` 输出读取，非 ASCII 文件名（中文、日文、emoji 等）完整回传、不再乱码。
 
 > **范围说明**：只搜文件名和路径，不搜文件内容——内容搜索请继续用 `grep`。
 > **覆盖说明**：结果取决于本机 Everything 索引——NTFS/reFS 磁盘与显式加入索引的目录；FAT/exFAT 可移动盘与网络共享通常不在覆盖范围。

@@ -105,3 +105,48 @@ test('sort date-modified-descending orders recency end to end', { skip, timeout:
     assert.ok(times[i - 1] >= times[i], `expected non-increasing dateModified, got ${value.results.map((r) => r.dateModified).join(' | ')}`);
   }
 });
+
+test('multi-word query ANDs its terms (es.exe takes one term per argument)', { skip, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-everything-'));
+  const unique = `dsh-multi-${Date.now()}.log`;
+  await writeFile(join(dir, unique), 'multi-term payload');
+
+  const tool = loadTool();
+  // Pre-fix this single query string was passed as one es.exe argument,
+  // matched literally and returned 0 results.
+  let value;
+  let found = null;
+  for (let i = 0; i < 15 && found === null; i += 1) {
+    value = await tool.execute({ query: `${unique} dm:today` });
+    found = value.results.find((r) => r.path.toLowerCase().endsWith(`\\${unique.toLowerCase()}`)) ?? null;
+    if (found === null) await new Promise((r) => setTimeout(r, 1000));
+  }
+  assert.ok(found, `expected ${unique} via multi-term query; last value: ${JSON.stringify(value)}`);
+});
+
+test('non-ASCII file names survive the round trip (UTF-8 export path)', { skip, timeout: 60000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-everything-'));
+  const unique = `中文名-${Date.now()}.txt`;
+  await writeFile(join(dir, unique), 'unicode payload');
+
+  const tool = loadTool();
+  const asciiPart = unique.slice(unique.indexOf('-') + 1);
+  let value;
+  let found = null;
+  for (let i = 0; i < 15 && found === null; i += 1) {
+    value = await tool.execute({ query: asciiPart });
+    found = value.results.find((r) => r.path.toLowerCase().endsWith(`\\${unique.toLowerCase()}`)) ?? null;
+    if (found === null) await new Promise((r) => setTimeout(r, 1000));
+  }
+  assert.ok(found, `expected ${unique}; last value: ${JSON.stringify(value)}`);
+  assert.ok(!found.path.includes('\uFFFD'), `mojibake in path: ${found.path}`);
+  assert.ok(found.path.includes('中文名'), `expected the CJK part intact in ${found.path}`);
+});
+
+test('zero-result queries return an empty page, not an error', { skip, timeout: 60000 }, async () => {
+  const tool = loadTool();
+  const value = await tool.execute({ query: `zzz-no-such-thing-${Date.now()}` });
+  assert.deepEqual(value.results, []);
+  assert.equal(value.total, 0);
+  assert.equal(value.truncated, false);
+});

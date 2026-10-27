@@ -4,12 +4,14 @@ import {
   apply,
   buildSearchFlags,
   clampInt,
+  decodeEsStdout,
   EverythingError,
   formatSize,
   parseResults,
   presentCall,
   presentResult,
   renderResults,
+  tokenizeQuery,
 } from '../index.js';
 
 test('clampInt: bounds and fallback', () => {
@@ -28,9 +30,61 @@ test('formatSize: thresholds', () => {
   assert.equal(formatSize(3 * 1024 * 1024 * 1024), '3.00 GB');
 });
 
-test('buildSearchFlags: plain query is appended last', () => {
-  assert.deepEqual(buildSearchFlags({}, 'report ext:docx'), ['report ext:docx']);
+test('buildSearchFlags: multi-word query is split into separate es.exe terms', () => {
+  // es.exe takes each argument as ONE search term; a term containing a space
+  // is matched literally and never matches. So "*.docx dm:thisweek" MUST be
+  // passed as two arguments.
+  assert.deepEqual(buildSearchFlags({}, 'report ext:docx'), ['report', 'ext:docx']);
+  assert.deepEqual(buildSearchFlags({}, '   *.sln\t dm:thisweek  '), ['*.sln', 'dm:thisweek']);
 });
+
+test('buildSearchFlags: query reduced to nothing but quotes is rejected', () => {
+  assert.throws(
+    () => buildSearchFlags({}, '  "" "" '),
+    (e) => e instanceof EverythingError && e.code === 'ES_INVALID_ARGS'
+  );
+});
+
+test('tokenizeQuery: quoted phrase without spaces keeps its quotes', () => {
+  assert.deepEqual(tokenizeQuery('"exact-phrase" ext:md'), ['"exact-phrase"', 'ext:md']);
+});
+
+test('tokenizeQuery: quoted phrase with spaces degrades to its words', () => {
+  // es.exe cannot express a positional term containing a space.
+  assert.deepEqual(tokenizeQuery('"foo bar" *.txt'), ['foo', 'bar', '*.txt']);
+});
+
+test('tokenizeQuery: unbalanced quotes keep the trailing token', () => {
+  assert.deepEqual(tokenizeQuery('foo "bar'), ['foo', '"bar']);
+});
+
+test('tokenizeQuery: quote-only and whitespace-only tokens are dropped', () => {
+  assert.deepEqual(tokenizeQuery('  ""   "" '), []);
+});
+
+test('decodeEsStdout: pure ASCII passes through', () => {
+  assert.equal(decodeEsStdout(Buffer.from('47\r\n', 'utf8')), '47\r\n');
+});
+
+test('decodeEsStdout: valid UTF-8 passes through untouched', () => {
+  const text = '[{"filename":"C:\\\\包干区.txt"}]';
+  assert.equal(decodeEsStdout(Buffer.from(text, 'utf8')), text);
+});
+
+test('decodeEsStdout: GBK bytes are decoded as GBK (console codepage output)', { skip: gbkDecoderUnavailable() }, () => {
+  // "包干区" in GBK: B0FC B8C9 C7F8 — invalid as UTF-8, decodable as GBK.
+  const gbk = Buffer.from([0xb0, 0xfc, 0xb8, 0xc9, 0xc7, 0xf8]);
+  assert.equal(decodeEsStdout(gbk), '包干区');
+});
+
+function gbkDecoderUnavailable() {
+  try {
+    new TextDecoder('gbk');
+    return false;
+  } catch {
+    return true; // small-ICU Node build without legacy decoder support
+  }
+}
 
 test('buildSearchFlags: regex consumes the query as its value', () => {
   assert.deepEqual(buildSearchFlags({ regex: true }, '^foo.*\\.js$'), ['-regex', '^foo.*\\.js$']);

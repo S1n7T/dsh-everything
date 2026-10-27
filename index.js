@@ -2,8 +2,9 @@
  * dsh-everything: model-facing `everything_search` tool backed by the local
  * Everything (voidtools) index through the official ES command line (es.exe).
  *
- * The tool spawns es.exe with a fixed argv vector (no shell layer), parses its
- * `-json` output, and projects results onto the built-in search-paths card.
+ * The tool spawns es.exe with a fixed argv vector (no shell layer), reads its
+ * results from a UTF-8 `-export-json` file (immune to console codepages), and
+ * projects results onto the built-in search-paths card.
  * No external npm dependencies. Windows only: Everything itself is a Windows
  * application, so on other platforms a stub tool is registered that fails with
  * a clear platform message instead of a confusing spawn error.
@@ -18,8 +19,9 @@
  *   timeoutMs      per-spawn timeout in milliseconds (default: 8000)
  */
 import { execFile, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { win32 as win32path } from 'node:path';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinPath, win32 as win32path } from 'node:path';
 import { ensureBackend, EverythingError } from './setup.js';
 
 const DEFAULT_MAX_RESULTS = 100;
@@ -64,7 +66,7 @@ function resolveEverythingPath(config, esPath) {
   return 'Everything.exe';
 }
 
-/** Run es.exe once and resolve with its raw stdout. Errors are classified into actionable codes. */
+/** Run es.exe once and resolve with its raw stdout Buffer. Errors are classified into actionable codes. */
 function runEs(esPath, argv, timeoutMs, signal) {
   return new Promise((resolve, reject) => {
     let child;
@@ -72,7 +74,7 @@ function runEs(esPath, argv, timeoutMs, signal) {
       child = execFile(
         esPath,
         argv,
-        { timeout: timeoutMs, maxBuffer: MAX_BUFFER, windowsHide: true, signal },
+        { timeout: timeoutMs, maxBuffer: MAX_BUFFER, windowsHide: true, signal, encoding: 'buffer' },
         (error, stdout, stderr) => {
           const stderrText = typeof stderr === 'string' ? stderr.trim() : '';
           if (error) {
@@ -104,7 +106,7 @@ function runEs(esPath, argv, timeoutMs, signal) {
             reject(new EverythingError('everything_search: Everything is not running.', 'ES_NOT_RUNNING'));
             return;
           }
-          resolve(typeof stdout === 'string' ? stdout : '');
+          resolve(stdout); // Buffer (execFile encoding: 'buffer')
         }
       );
     } catch (error) {
@@ -147,6 +149,84 @@ async function autoStartEverything(everythingPath, esPath, signal) {
 }
 
 /**
+ * Split an Everything search expression into es.exe search terms.
+ *
+ * es.exe takes each command-line argument as ONE search term; an argument
+ * that itself contains a space is matched literally and never matches, so
+ * `*.docx dm:thisweek` MUST be passed as two arguments. Quoted phrases
+ * without spaces keep their quotes (phrase semantics); a quoted phrase that
+ * contains a space cannot be expressed positionally, so it degrades to its
+ * component words ANDed together (use regex=true for exact multi-word
+ * matching).
+ */
+function tokenizeQuery(query) {
+  const tokens = [];
+  let current = '';
+  let inQuotes = false;
+  const flush = () => {
+    if (current.length === 0) return;
+    if (/\s/.test(current)) {
+      // Only reachable for a quoted phrase with internal spaces: es.exe cannot
+      // take it as one term, so degrade to its component words (quotes stripped).
+      for (const word of current.split(/\s+/)) {
+        const bare = word.replace(/"/g, '');
+        if (bare.length > 0) tokens.push(bare);
+      }
+    } else if (current.replace(/"/g, '').length > 0) {
+      tokens.push(current);
+    }
+    current = '';
+  };
+  for (const ch of query) {
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+    } else if (!inQuotes && /\s/.test(ch)) {
+      flush();
+    } else {
+      current += ch;
+    }
+  }
+  flush();
+  return tokens;
+}
+
+/** Decode es.exe stdout: it emits the console/ANSI codepage, not UTF-8. */
+function decodeEsStdout(buf) {
+  if (!buf || buf.length === 0) return '';
+  const utf8 = buf.toString('utf8');
+  if (!utf8.includes('\uFFFD')) return utf8;
+  try {
+    return new TextDecoder('gbk').decode(buf);
+  } catch {
+    return utf8;
+  }
+}
+
+let exportFileCounter = 0;
+
+/**
+ * Read the UTF-8 file written by `es.exe -export-json <file>`.
+ * The file occasionally exists but is still empty right after the process
+ * exits (flush race), so an empty read is retried briefly.
+ * Returns { exists, text } — `exists: false` lets the caller fall back to
+ * decoding stdout (e.g. an es.exe build that ignores -export-json).
+ */
+function readExportText(filePath) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const text = readFileSync(filePath, 'utf8');
+      if (text.length > 0) return { exists: true, text: text.replace(/^\uFEFF/, '') };
+    } catch {
+      return { exists: false, text: '' };
+    }
+    // exists but empty: brief wait for the flush race
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+  return { exists: true, text: '' };
+}
+
+/**
  * Shared search flag vector (everything except output formatting and result
  * window). NOTE: `-regex` consumes the search text as its own value, so the
  * query must be appended here, last.
@@ -166,7 +246,13 @@ function buildSearchFlags(args, query) {
     argv.push('-sort', sort);
   }
   if (args.regex === true) argv.push('-regex', query);
-  else argv.push(query);
+  else {
+    const terms = tokenizeQuery(query);
+    if (terms.length === 0) {
+      throw new EverythingError('everything_search: "query" must contain at least one search term (not only quotes or whitespace).', 'ES_INVALID_ARGS');
+    }
+    argv.push(...terms);
+  }
   return argv;
 }
 
@@ -286,7 +372,7 @@ const PARAMETERS_SCHEMA = {
 };
 
 const TOOL_DESCRIPTION =
-  'Locate files and folders across every indexed drive on this machine through the local Everything (voidtools) index — answers in milliseconds, far faster than glob or a recursive directory scan. Use this FIRST whenever you need to find a file or folder by name, extension, or path, especially outside the workspace. The query uses Everything search syntax, not a glob: plain words match names, `*`/`?` wildcards, `ext:js;ts` filters extensions, `dm:today` / `dm:thisweek` filter date modified, `size:>10mb` filters size, space means AND, `|` means OR, `!` means NOT, double quotes give an exact phrase (avoid combining quoted phrases with modifiers such as ext:). Combine sort="date-modified-descending" with dm:thisweek for recently changed files, or sort="size-descending" to find the biggest ones first. Restrict scope with the dedicated path parameter rather than a path: prefix inside query. Set regex=true for a full regular expression over the whole path, countOnly=true for a fast match count without paths, dateCreated=true to also return creation dates. Returns absolute paths with size and date modified. Names and paths only, never file contents — use grep for content. Coverage follows the local Everything index: NTFS/reFS drives and explicitly added folders; FAT/exFAT removable drives and network shares are typically not indexed.';
+  'Locate files and folders across every indexed drive on this machine through the local Everything (voidtools) index — answers in milliseconds, far faster than glob or a recursive directory scan. Use this FIRST whenever you need to find a file or folder by name, extension, or path, especially outside the workspace. The query uses Everything search syntax, not a glob: plain words match names, `*`/`?` wildcards, `ext:js;ts` filters extensions, `dm:today` / `dm:thisweek` filter date modified, `size:>10mb` filters size, space means AND, `|` means OR, `!` means NOT. Two quoting quirks: do NOT quote a filename-with-extension like "report.docx" — quoted phrases only match the name part, so pass it unquoted; and quoted phrases must not contain spaces (use regex=true for exact multi-word matching). Combine sort="date-modified-descending" with dm:thisweek for recently changed files, or sort="size-descending" to find the biggest ones first. Restrict scope with the dedicated path parameter rather than a path: prefix inside query. Set regex=true for a full regular expression over the whole path, countOnly=true for a fast match count without paths, dateCreated=true to also return creation dates. Returns absolute paths with size and date modified; non-ASCII names come back intact. Names and paths only, never file contents — use grep for content. Coverage follows the local Everything index: NTFS/reFS drives and explicitly added folders; FAT/exFAT removable drives and network shares are typically not indexed.';
 
 const OUTPUT_SCHEMA = {
   type: 'object',
@@ -416,8 +502,34 @@ export function apply(ctx, config = {}) {
     if (input.dateCreated === true) searchArgv.push('-dc');
     if (offset > 0) searchArgv.push('-viewport-offset', String(offset));
     searchArgv.push(...flags);
-    const stdout = await runEsWithRetry(searchArgv, signal);
-    return { flags, results: parseResults(stdout) };
+
+    // Primary path: es.exe writes results to a UTF-8 file. Piping stdout
+    // instead emits the ANSI codepage and mangles non-ASCII names (GBK on a
+    // zh-CN machine, question marks elsewhere).
+    const exportPath = joinPath(tmpdir(), `dsh-everything-${process.pid}-${Date.now()}-${++exportFileCounter}.json`);
+    try {
+      let stdoutBuf;
+      try {
+        stdoutBuf = await runEsWithRetry([...searchArgv, '-export-json', exportPath], signal);
+      } catch (error) {
+        // es.exe builds that reject the option: retry once in stdout mode.
+        if (!(error instanceof EverythingError) || error.code !== 'ES_FAILED' || !/export|unknown|invalid|option/i.test(error.message ?? '')) throw error;
+        stdoutBuf = await runEsWithRetry(searchArgv, signal);
+        return { flags, results: parseResults(decodeEsStdout(stdoutBuf)) };
+      }
+      const exported = readExportText(exportPath);
+      if (!exported.exists) {
+        // No file written: an es.exe that ignores the option printed to stdout.
+        return { flags, results: parseResults(decodeEsStdout(stdoutBuf)) };
+      }
+      return { flags, results: parseResults(exported.text) };
+    } finally {
+      try {
+        unlinkSync(exportPath);
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   async function execute(args, exec) {
@@ -447,7 +559,7 @@ export function apply(ctx, config = {}) {
     if (results.length === limit) {
       try {
         const countOut = await runEs(esPath, ['-get-result-count', ...flags], timeoutMs, signal);
-        const parsed = Number.parseInt(countOut.trim(), 10);
+        const parsed = Number.parseInt(String(countOut).trim(), 10);
         if (Number.isFinite(parsed) && parsed >= total) total = parsed;
       } catch {
         /* count is cosmetic; keep the page-based estimate */
@@ -482,10 +594,12 @@ export function apply(ctx, config = {}) {
 export {
   buildSearchFlags,
   clampInt,
+  decodeEsStdout,
   formatSize,
   parseResults,
   presentCall,
   presentResult,
   renderResults,
   resolveEsPath,
+  tokenizeQuery,
 };

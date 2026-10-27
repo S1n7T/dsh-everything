@@ -48,7 +48,7 @@ Published on npm as [`dsh-everything`](https://www.npmjs.com/package/dsh-everyth
 
 | Parameter | Type | Description |
 |---|---|---|
-| `query` *(required)* | string | Everything search expression: `report ext:docx`, `*.sln dm:thisweek`, `path:\projects\ ext:py`. Space = AND, `\|` = OR, `!` = NOT, quotes = exact phrase. |
+| `query` *(required)* | string | Everything search expression: `report ext:docx`, `*.sln dm:thisweek`, `path:\projects\ ext:py`. Space = AND, `\|` = OR, `!` = NOT. Multi-word queries are split into es.exe terms automatically. |
 | `path` | string | Restrict to a directory and its subtree (absolute path). |
 | `maxResults` | integer | Result cap (default 100, ceiling 1000). |
 | `offset` | integer | Skip leading results (pagination). |
@@ -63,6 +63,9 @@ Published on npm as [`dsh-everything`](https://www.npmjs.com/package/dsh-everyth
 Returns `{ query, total, truncated, results: [{ path, size, dateModified, dateCreated? }] }` and renders in the chat as a search-paths card.
 
 Typical queries: `report ext:docx` · `*.sln dm:thisweek` · `size:>500mb` · `notes !archive` · recently changed files with `sort: date-modified-descending` + `dm:thisweek`.
+
+> **Phrase quirks:** a quoted phrase only matches the *name* part, so `"report.docx"` matches nothing — pass it unquoted. Phrases containing spaces cannot be expressed through the es.exe CLI (they degrade to ANDed words); use `regex=true` for exact multi-word matching.
+> **Encoding:** results are read from es.exe's UTF-8 `-export-json` output, so non-ASCII file names (Chinese, Japanese, emoji, …) survive the round trip intact.
 
 > **Scope note:** searches names and paths only, never file contents — content search stays with `grep`.
 > **Coverage note:** results follow the local Everything index — NTFS/reFS drives and folders explicitly added to the index. FAT/exFAT removable drives and network shares are typically not covered.

@@ -3,6 +3,22 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.1] - 2026-10-27
+
+### Fixed
+- Multi-word queries (`*.docx dm:thisweek`) silently returned 0 results: the
+  whole query string was handed to es.exe as ONE argument, which Everything
+  then matched literally. Queries are now tokenized on whitespace (outside
+  double quotes) and each term is passed as its own argument, restoring AND
+  semantics. Quoted phrases without spaces keep their phrase meaning; quoted
+  phrases containing spaces degrade to ANDed words (es.exe cannot express
+  them positionally — use `regex=true` for exact multi-word matching).
+- Non-ASCII file names came back as mojibake (`?????`): es.exe pipes results
+  in the console/ANSI codepage, not UTF-8. Results are now read from es.exe's
+  UTF-8 `-export-json` file instead, so Chinese/Japanese/emoji names survive
+  the round trip on every codepage (with a decoded-stdout fallback for es.exe
+  builds without `-export-json`).
+
 ## [1.3.0] - 2026-10-26
 
 ### Added
