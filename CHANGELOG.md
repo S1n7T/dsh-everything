@@ -3,6 +3,41 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.0] - 2026-10-27
+
+### Added
+- **HTTP fast channel**: searches are now served by Everything's built-in
+  HTTP JSON server on `127.0.0.1` when it is available — no per-call
+  `es.exe` spawn, native UTF-8, and exact totals for free. The plugin
+  auto-enables the server itself (Everything ships it disabled AND
+  policy-locked: `allow_http_server=0` in the ini next to
+  `Everything.exe`; the GUI cannot unlock it) by patching both
+  `Everything.ini` files, binding loopback only, and restarting the GUI
+  once per session (`httpAutoEnable`, default on; `httpPort` default 5151,
+  `0` disables; optional Basic auth via `httpUsername`/`httpPassword`).
+  The `es.exe` CLI remains the always-available fallback and covers
+  `dateCreated`, the extra sort keys, and `regex` + `path`/type-filter
+  combinations the HTTP API cannot express.
+- `exactTotal` (default `true`): set `false` to skip the extra
+  match-count round-trip on full pages; the total then reports as a
+  page-based lower bound (`≥N`, `totalExact: false`).
+- Results now carry `channel` (`"http"`/`"es"`), `totalExact`, and `notes`
+  (non-fatal query-interpretation remarks) so behavior is observable.
+- A whole-query quoted phrase containing spaces (an exact multi-word
+  match) is automatically converted to an equivalent regex — previously
+  it degraded to ANDed words silently.
+
+### Fixed
+- `readExportText` no longer blocks the event loop while waiting out the
+  es.exe export-file flush race (async retry instead of `Atomics.wait`),
+  and a genuinely empty/missing export file now falls back to decoded
+  stdout instead of reporting a fake empty result page.
+- A `path` that does not exist (or points at a file) is rejected up front
+  with `ES_INVALID_ARGS` instead of silently returning "no matches"
+  (UNC paths are checked after a zero-result page).
+- `truncated` is `true` whenever a full page is returned with an
+  inexact total, not only when the exact count exceeds the page.
+
 ## [1.3.1] - 2026-10-27
 
 ### Fixed

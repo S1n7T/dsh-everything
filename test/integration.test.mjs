@@ -10,7 +10,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { apply } from '../index.js';
-import { compareVersions, getExeFileVersion } from '../setup.js';
+import { compareVersions, getExeFileVersion, probeHttpPort, EverythingError } from '../setup.js';
 
 const ES_CANDIDATES = [
   process.env.ES_PATH,
@@ -32,6 +32,22 @@ function loadTool(config = {}) {
 }
 
 const everythingDir = esPath === undefined ? null : dirname(esPath);
+
+const HTTP_PORT = 5151;
+
+/** Poll the local HTTP server until it answers (or the budget runs out). */
+async function waitForHttp(port, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    try {
+      await probeHttpPort(port, { timeoutMs: 1500 });
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  return false;
+}
 
 test('finds a uniquely named file through the real index', { skip, timeout: 60000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-everything-'));
@@ -80,9 +96,10 @@ test('countOnly returns a total without paths', { skip, timeout: 60000 }, async 
   assert.equal(value.truncated, false);
 });
 
-test('dateCreated adds the creation date column', { skip, timeout: 60000 }, async () => {
+test('dateCreated adds the creation date column (es.exe channel)', { skip, timeout: 60000 }, async () => {
   const tool = loadTool();
   const value = await tool.execute({ query: 'es.exe', path: everythingDir, maxResults: 5, dateCreated: true });
+  assert.equal(value.channel, 'es'); // the HTTP server has no date_created column
   assert.ok(value.results.length > 0);
   for (const entry of value.results) {
     assert.equal(typeof entry.dateCreated, 'string', `missing dateCreated on ${entry.path}`);
@@ -149,4 +166,47 @@ test('zero-result queries return an empty page, not an error', { skip, timeout: 
   assert.deepEqual(value.results, []);
   assert.equal(value.total, 0);
   assert.equal(value.truncated, false);
+});
+
+test('HTTP channel serves searches once enabled (auto-enable path)', { skip, timeout: 120000 }, async () => {
+  // Default config: httpPort 5151 + httpAutoEnable. The first call may run
+  // through es.exe while the one-shot auto-enable (ini patch + GUI restart)
+  // completes in the background; afterwards searches must go over HTTP.
+  const tool = loadTool();
+  const warmup = await tool.execute({ query: 'es.exe', maxResults: 1 });
+  assert.ok(warmup.channel === 'http' || warmup.channel === 'es');
+
+  const httpUp = await waitForHttp(HTTP_PORT, 40000);
+  assert.ok(httpUp, 'the Everything HTTP server should have come up on 127.0.0.1:5151');
+
+  // Give the background enable chain a moment to flip its ready flag, then
+  // retry: a call inside the 30s breaker window still uses es.exe.
+  let value = null;
+  for (let i = 0; i < 6; i += 1) {
+    value = await tool.execute({ query: 'es.exe', path: everythingDir, maxResults: 5 });
+    if (value.channel === 'http') break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  assert.equal(value.channel, 'http', `expected the HTTP channel, got ${JSON.stringify(value).slice(0, 300)}`);
+  assert.equal(value.totalExact, true); // HTTP totals are always exact
+  assert.ok(value.results.length > 0);
+  assert.ok(value.results.every((r) => typeof r.dateModified === 'string'));
+  assert.ok(value.results.every((r) => r.path.toLowerCase().startsWith(everythingDir.toLowerCase())));
+});
+
+test('a non-existent local path is rejected up front', { skip, timeout: 60000 }, async () => {
+  const tool = loadTool();
+  await assert.rejects(
+    () => tool.execute({ query: 'es.exe', path: `C:\\dsh-no-such-dir-${Date.now()}` }),
+    (e) => e instanceof EverythingError && e.code === 'ES_INVALID_ARGS' && /path does not exist/.test(e.message)
+  );
+});
+
+test('exactTotal=false skips the count round-trip and reports a lower bound', { skip, timeout: 60000 }, async () => {
+  const tool = loadTool({ httpPort: 0 }); // force the es.exe channel
+  const value = await tool.execute({ query: 'es.exe', maxResults: 2, exactTotal: false });
+  assert.equal(value.channel, 'es');
+  assert.equal(value.totalExact, false);
+  assert.equal(value.total, 2); // page-based estimate: offset + page length
+  assert.equal(value.truncated, true);
 });

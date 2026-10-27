@@ -23,7 +23,7 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { win32 as win32path } from 'node:path';
 
@@ -412,13 +412,30 @@ export function findEverythingInstall() {
   return null;
 }
 
+/**
+ * Fresh installs ship with the HTTP server feature locked off
+ * (allow_http_server=0 in the ini next to Everything.exe). Open it once at
+ * install time so the fast channel can come up later.
+ */
+function allowHttpInLocalIni(everythingPath, log) {
+  try {
+    const localIni = win32path.join(win32path.dirname(everythingPath), 'Everything.ini');
+    patchIniValue(localIni, 'allow_http_server', 1, { create: true });
+  } catch (error) {
+    log?.warn?.(`everything_search: could not unlock the HTTP server in the Everything.ini next to ${everythingPath} (${error?.message ?? error}).`);
+  }
+}
+
 async function installEverything(installDir, log, proxy) {
   // Strategy 1: winget (present on most Windows 10/11 desktops).
   try {
     log?.info?.('everything_search: installing Everything via winget (a UAC prompt may appear)…');
     await run('winget', buildWingetInstallArgs(), WINGET_TIMEOUT_MS);
     const found = findEverythingInstall();
-    if (found) return { everythingPath: found, via: 'winget' };
+    if (found) {
+      allowHttpInLocalIni(found, log);
+      return { everythingPath: found, via: 'winget' };
+    }
   } catch (error) {
     log?.warn?.(`everything_search: winget install failed (${error?.message ?? error}); falling back to the official setup.`);
   }
@@ -438,6 +455,7 @@ async function installEverything(installDir, log, proxy) {
       'ES_SETUP_FAILED'
     );
   }
+  allowHttpInLocalIni(found, log);
   return { everythingPath: found, via: 'setup' };
 }
 
@@ -519,4 +537,137 @@ export async function ensureBackend({ config = {}, log = null, proxy, probe = nu
 /** Fire a detached, unref'd process. Used to (re)start Everything.exe. */
 export function launchDetached(binaryPath, argv) {
   spawn(binaryPath, argv, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Replace (or append) one `key=value` line in an Everything .ini file.
+ * `onlyIfEmpty` keeps an existing non-empty value (used for bindings so a
+ * user's explicit choice is never overridden). Returns true when the file
+ * was written.
+ */
+export function patchIniValue(filePath, key, value, { create = false, onlyIfEmpty = false } = {}) {
+  let text = '';
+  if (existsSync(filePath)) text = readFileSync(filePath, 'utf8');
+  else if (!create) return false;
+  const line = `${key}=${value}`;
+  const re = new RegExp(`^${key}=.*$`, 'm');
+  if (re.test(text)) {
+    const current = text.match(re)[0];
+    if (onlyIfEmpty && current !== `${key}=`) return false;
+    writeFileSync(filePath, text.replace(re, line), 'utf8');
+    return true;
+  }
+  const out = text.length === 0 ? `[Everything]\n${line}\n` : `${text.endsWith('\n') ? text : `${text}\n`}${line}\n`;
+  writeFileSync(filePath, out, 'utf8');
+  return true;
+}
+
+/**
+ * Probe the Everything HTTP JSON server on 127.0.0.1:<port>. Validates the
+ * `totalResults` field so a foreign service on the same port is detected,
+ * not silently used. Resolves true, or throws ES_HTTP_UNREACHABLE.
+ */
+export async function probeHttpPort(port, { timeoutMs = 1500, username = '', password = '' } = {}) {
+  const url = `http://127.0.0.1:${port}/?${new URLSearchParams({ json: '1', search: '_dsh_probe_', count: '1' }).toString()}`;
+  const headers = username ? { authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}` } : undefined;
+  let res;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    throw new EverythingError(`everything_search setup: no Everything HTTP server on 127.0.0.1:${port} (${error?.cause?.code ?? error?.message ?? error}).`, 'ES_HTTP_UNREACHABLE');
+  }
+  if (!res.ok) {
+    throw new EverythingError(`everything_search setup: HTTP probe on 127.0.0.1:${port} returned ${res.status}.`, 'ES_HTTP_UNREACHABLE');
+  }
+  let json;
+  try {
+    json = await res.json();
+  } catch {
+    throw new EverythingError(`everything_search setup: the service on 127.0.0.1:${port} is not the Everything HTTP server.`, 'ES_HTTP_UNREACHABLE');
+  }
+  if (typeof json?.totalResults !== 'number') {
+    throw new EverythingError(`everything_search setup: the service on 127.0.0.1:${port} is not the Everything HTTP server.`, 'ES_HTTP_UNREACHABLE');
+  }
+  return true;
+}
+
+/** Kill the Everything GUI (session > 0); the background service is left alone. */
+async function stopEverythingGui() {
+  const script = 'Get-Process Everything -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Stop-Process -Force';
+  try {
+    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 20000);
+    await sleep(500);
+  } catch {
+    /* best effort — the config patch still applies at next Everything start */
+  }
+}
+
+/**
+ * Turn on Everything's built-in HTTP JSON server.
+ *
+ * Everything 1.4 ships it disabled AND locked: the per-machine policy switch
+ * `allow_http_server` in the Everything.ini next to Everything.exe defaults
+ * to 0 (installed builds), and the per-user %APPDATA% ini only honors
+ * http_server_* when the local lock is open. The server cannot be enabled
+ * through the GUI on locked installs, so we patch both files directly and
+ * restart the GUI (the background index service keeps running untouched).
+ *
+ * Idempotent: returns {enabled: false, alreadyRunning: true} when the server
+ * already answers. All failures are returned, never thrown — the caller
+ * stays on the es.exe channel.
+ */
+export async function ensureHttpServer({ port = 5151, everythingPath, log = null, username = '', password = '' } = {}) {
+  try {
+    await probeHttpPort(port, { username, password });
+    return { enabled: false, alreadyRunning: true };
+  } catch {
+    /* not up yet — continue below */
+  }
+
+  if (!everythingPath || !existsSync(everythingPath)) {
+    return { enabled: false, reason: 'Everything.exe path unknown' };
+  }
+
+  log?.info?.(`everything_search: enabling the Everything HTTP server on 127.0.0.1:${port} (the Everything GUI restarts once)…`);
+  await stopEverythingGui();
+
+  // 1. Unlock the feature in the ini next to Everything.exe (machine policy).
+  const localIni = win32path.join(win32path.dirname(everythingPath), 'Everything.ini');
+  try {
+    patchIniValue(localIni, 'allow_http_server', 1, { create: true });
+  } catch (error) {
+    log?.warn?.(`everything_search: could not patch ${localIni} (${error?.message ?? error}).`);
+  }
+
+  // 2. Enable + configure it in the per-user ini. Bind loopback only when the
+  //    user has not chosen something else.
+  const appDataDir = process.env.APPDATA ?? win32path.join(process.env.USERPROFILE ?? '.', 'AppData', 'Roaming');
+  const appDataIni = win32path.join(appDataDir, 'Everything', 'Everything.ini');
+  try {
+    mkdirSync(win32path.dirname(appDataIni), { recursive: true });
+    patchIniValue(appDataIni, 'http_server_enabled', 1, { create: true });
+    patchIniValue(appDataIni, 'http_server_port', port, { create: true });
+    patchIniValue(appDataIni, 'http_server_username', username, { create: true });
+    patchIniValue(appDataIni, 'http_server_password', password, { create: true });
+    patchIniValue(appDataIni, 'http_server_bindings', '127.0.0.1', { create: true, onlyIfEmpty: true });
+  } catch (error) {
+    log?.warn?.(`everything_search: could not patch ${appDataIni} (${error?.message ?? error}).`);
+  }
+
+  // 3. Restart the GUI detached and wait for the server to answer.
+  launchDetached(everythingPath, ['-startup']);
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    await sleep(250);
+    try {
+      await probeHttpPort(port, { username, password });
+      return { enabled: true };
+    } catch {
+      /* retry until the deadline */
+    }
+  }
+  log?.warn?.(`everything_search: the Everything HTTP server did not come up on 127.0.0.1:${port} within 15s; staying on the es.exe channel.`);
+  return { enabled: false, reason: 'timeout' };
 }

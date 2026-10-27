@@ -2,9 +2,9 @@
 
 [中文文档](README.zh-CN.md)
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that gives the agent an **`everything_search`** tool: whole-disk file and folder search in **milliseconds**, powered by the local [Everything](https://www.voidtools.com/) (voidtools) index through its official command line `es.exe`.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that gives the agent an **`everything_search`** tool: whole-disk file and folder search in **milliseconds**, powered by the local [Everything](https://www.voidtools.com/) (voidtools) index.
 
-Instead of recursively scanning directories (glob) when the model needs to locate a file, the agent asks Everything's pre-built index — instant even on drives with millions of files.
+Instead of recursively scanning directories (glob) when the model needs to locate a file, the agent asks Everything's pre-built index — instant even on drives with millions of files. Two channels are used: Everything's built-in HTTP JSON server (loopback only, auto-enabled — no process spawn per call, native UTF-8, exact totals) with the official command line `es.exe` as an always-available fallback for everything the HTTP server cannot express.
 
 ## Requirements
 
@@ -59,13 +59,14 @@ Published on npm as [`dsh-everything`](https://www.npmjs.com/package/dsh-everyth
 | `foldersOnly` / `filesOnly` | boolean | Restrict result type. |
 | `dateCreated` | boolean | Also return each result's creation date. |
 | `countOnly` | boolean | Return only the total match count — the fastest way to check existence or estimate volume. |
+| `exactTotal` | boolean | Default `true`. `false` skips the extra match-count round-trip on full pages and reports a `≥N` total instead. |
 
-Returns `{ query, total, truncated, results: [{ path, size, dateModified, dateCreated? }] }` and renders in the chat as a search-paths card.
+Returns `{ query, total, totalExact, truncated, results: [{ path, size, dateModified, dateCreated? }], channel, notes }` (`channel` is `"http"` or `"es"`; `notes` carries query-interpretation remarks) and renders in the chat as a search-paths card.
 
 Typical queries: `report ext:docx` · `*.sln dm:thisweek` · `size:>500mb` · `notes !archive` · recently changed files with `sort: date-modified-descending` + `dm:thisweek`.
 
-> **Phrase quirks:** a quoted phrase only matches the *name* part, so `"report.docx"` matches nothing — pass it unquoted. Phrases containing spaces cannot be expressed through the es.exe CLI (they degrade to ANDed words); use `regex=true` for exact multi-word matching.
-> **Encoding:** results are read from es.exe's UTF-8 `-export-json` output, so non-ASCII file names (Chinese, Japanese, emoji, …) survive the round trip intact.
+> **Phrase quirks:** a quoted phrase only matches the *name* part, so `"report.docx"` matches nothing — pass it unquoted. A quoted phrase **containing spaces that is the whole query** (an exact multi-word match) is automatically converted to an equivalent regex; one embedded alongside other terms degrades to ANDed words and is reported in `notes` (use `regex=true` for those).
+> **Encoding:** the HTTP channel is UTF-8 natively; the es.exe fallback reads its UTF-8 `-export-json` output — non-ASCII file names (Chinese, Japanese, emoji, …) survive the round trip intact either way.
 
 > **Scope note:** searches names and paths only, never file contents — content search stays with `grep`.
 > **Coverage note:** results follow the local Everything index — NTFS/reFS drives and folders explicitly added to the index. FAT/exFAT removable drives and network shares are typically not covered.
@@ -82,11 +83,20 @@ Edit the plugin's `config` in `cordis.patch.yml` (or your profile's patch layer)
 | `autoInstall` | `true` | Download & install Everything + ES CLI when missing (see above). |
 | `installDir` | `%LOCALAPPDATA%\dsh-everything` | Where the auto-installed ES CLI lives. |
 | `maxResults` | `100` | Default per-call result cap. |
-| `timeoutMs` | `8000` | Per-spawn timeout (ms). |
+| `timeoutMs` | `8000` | Per-call timeout (ms). |
+| `httpPort` | `5151` | Everything HTTP server port for the fast channel; `0` disables the HTTP channel entirely. |
+| `httpAutoEnable` | `true` | When the HTTP server is down, once per session: patch Everything's own config (unlock + enable + loopback bind) and restart its GUI. Set `false` to never touch Everything's config. |
+| `httpUsername` / `httpPassword` | `''` | Optional Basic-auth credentials for the HTTP server. |
+
+### Fast path: the built-in HTTP server
+
+Everything 1.4 ships with an HTTP JSON server, but it is **disabled and policy-locked by default** — installed builds write `allow_http_server=0` next to `Everything.exe`, and the GUI cannot unlock it. With `httpAutoEnable: true` the plugin flips that switch itself (one-time, once per session): it patches both `Everything.ini` files, binds the server to **127.0.0.1 only**, restarts the Everything GUI, and routes searches through it. The background index service keeps running untouched.
+
+The HTTP channel serves plain searches, `path`/`foldersOnly`/`filesOnly` scope, `countOnly`, pagination, and the `name`/`path`/`size`/`date-modified` sort keys. Everything else — `dateCreated`, other sort keys, and `regex` combined with a `path` or type filter — automatically uses the es.exe channel instead. If the HTTP server cannot be started (port busy, Everything not installed yet), the plugin silently stays on es.exe and retries later; a `path` that does not exist is reported as an error rather than an empty result.
 
 ## Privacy
 
-The search scope is **every indexed drive** on the machine, and result paths are sent to the model as tool output. Keep that in mind on machines with sensitive directory layouts; use `path` to scope searches.
+The search scope is **every indexed drive** on the machine, and result paths are sent to the model as tool output. Keep that in mind on machines with sensitive directory layouts; use `path` to scope searches. The HTTP fast path listens on `127.0.0.1` only — nothing is exposed to the network.
 
 ## Development
 

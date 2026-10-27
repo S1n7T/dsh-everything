@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   compareVersions,
   parseDownloadsPage,
   parseProxyFromRegOutput,
+  patchIniValue,
   resolveInstallDir,
   resolveProxy,
   sha256File,
@@ -97,6 +98,44 @@ describe('compareVersions', () => {
     assert.ok(compareVersions('1.4.1', '1.10.0') < 0);
     assert.ok(compareVersions('1.1.0.38', '1.1.0.37') > 0);
     assert.equal(compareVersions('1.4.1.1032', '1.4.1.1032'), 0);
+  });
+});
+
+describe('patchIniValue', () => {
+  const ini = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-everything-ini-'));
+    return join(dir, 'Everything.ini');
+  };
+
+  it('replaces an existing key=value line', () => {
+    const file = ini();
+    writeFileSync(file, '[Everything]\nallow_http_server=0\nhttp_server_port=80\n', 'utf8');
+    assert.equal(patchIniValue(file, 'allow_http_server', 1), true);
+    assert.equal(readFileSync(file, 'utf8'), '[Everything]\nallow_http_server=1\nhttp_server_port=80\n');
+  });
+
+  it('appends a missing key and creates the file when asked', () => {
+    const file = ini(); // does not exist yet
+    assert.equal(patchIniValue(file, 'k', 'v', { create: true }), true);
+    assert.equal(readFileSync(file, 'utf8'), '[Everything]\nk=v\n');
+    // append into an existing file
+    assert.equal(patchIniValue(file, 'k2', 2, { create: true }), true);
+    assert.equal(readFileSync(file, 'utf8'), '[Everything]\nk=v\nk2=2\n');
+  });
+
+  it('does not touch an existing file without create', () => {
+    const file = ini();
+    assert.equal(patchIniValue(file, 'k', 'v'), false);
+    assert.ok(!existsSync(file));
+  });
+
+  it('onlyIfEmpty keeps a non-empty value but fills an empty one', () => {
+    const file = ini();
+    writeFileSync(file, '[Everything]\nhttp_server_bindings=\nhttp_server_port=5151\n', 'utf8');
+    assert.equal(patchIniValue(file, 'http_server_bindings', '127.0.0.1', { create: true, onlyIfEmpty: true }), true);
+    // non-empty value is left alone
+    assert.equal(patchIniValue(file, 'http_server_port', '1234', { create: true, onlyIfEmpty: true }), false);
+    assert.equal(readFileSync(file, 'utf8'), '[Everything]\nhttp_server_bindings=127.0.0.1\nhttp_server_port=5151\n');
   });
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-everything",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "DeepSeek Harness plugin: millisecond whole-disk file search for agents via the local Everything (voidtools) index",
   "keywords": ["dsh", "deepseek-harness", "everything", "voidtools", "file-search", "agent-tool"],
   "license": "MIT",

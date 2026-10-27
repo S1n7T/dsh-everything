@@ -6,3 +6,7 @@
         autoInstall: true
         maxResults: 100
         timeoutMs: 8000
+        httpPort: 5151
+        httpAutoEnable: true
+        httpUsername: ''
+        httpPassword: ''

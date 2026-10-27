@@ -6,8 +6,13 @@ import {
   clampInt,
   decodeEsStdout,
   EverythingError,
+  fileTimeToLocalIso,
   formatSize,
+  httpSearchParams,
+  httpSortParams,
   parseResults,
+  phraseToRegex,
+  prepareQuery,
   presentCall,
   presentResult,
   renderResults,
@@ -46,20 +51,39 @@ test('buildSearchFlags: query reduced to nothing but quotes is rejected', () => 
 });
 
 test('tokenizeQuery: quoted phrase without spaces keeps its quotes', () => {
-  assert.deepEqual(tokenizeQuery('"exact-phrase" ext:md'), ['"exact-phrase"', 'ext:md']);
+  assert.deepEqual(tokenizeQuery('"exact-phrase" ext:md'), { terms: ['"exact-phrase"', 'ext:md'], degraded: [] });
 });
 
-test('tokenizeQuery: quoted phrase with spaces degrades to its words', () => {
+test('tokenizeQuery: quoted phrase with spaces degrades to its words and is reported', () => {
   // es.exe cannot express a positional term containing a space.
-  assert.deepEqual(tokenizeQuery('"foo bar" *.txt'), ['foo', 'bar', '*.txt']);
+  assert.deepEqual(tokenizeQuery('"foo bar" *.txt'), { terms: ['foo', 'bar', '*.txt'], degraded: ['foo bar'] });
 });
 
 test('tokenizeQuery: unbalanced quotes keep the trailing token', () => {
-  assert.deepEqual(tokenizeQuery('foo "bar'), ['foo', '"bar']);
+  assert.deepEqual(tokenizeQuery('foo "bar'), { terms: ['foo', '"bar'], degraded: [] });
 });
 
 test('tokenizeQuery: quote-only and whitespace-only tokens are dropped', () => {
-  assert.deepEqual(tokenizeQuery('  ""   "" '), []);
+  assert.deepEqual(tokenizeQuery('  ""   "" '), { terms: [], degraded: [] });
+});
+
+test('prepareQuery: a whole-query quoted phrase with spaces becomes a regex', () => {
+  const prep = prepareQuery('"final report"');
+  assert.equal(prep.query, 'final\\s+report');
+  assert.equal(prep.regex, true);
+  assert.match(prep.note, /converted to a regular expression/);
+});
+
+test('prepareQuery: plain queries and quote-free phrases pass through', () => {
+  assert.deepEqual(prepareQuery('  *.docx dm:thisweek '), { query: '*.docx dm:thisweek', regex: false, note: null });
+  assert.deepEqual(prepareQuery('"dsh-everything"'), { query: '"dsh-everything"', regex: false, note: null });
+  // A quoted phrase alongside other terms is handled by tokenizeQuery instead.
+  assert.deepEqual(prepareQuery('"foo bar" x'), { query: '"foo bar" x', regex: false, note: null });
+});
+
+test('phraseToRegex: escapes regex metacharacters word by word', () => {
+  assert.equal(phraseToRegex('a.b (c)'), 'a\\.b\\s+\\(c\\)');
+  assert.equal(phraseToRegex('  spaced   out  '), 'spaced\\s+out');
 });
 
 test('decodeEsStdout: pure ASCII passes through', () => {
@@ -181,7 +205,7 @@ test('presentResult: narrows meta, falls back on malformed input', () => {
 test('apply: registers one tool named everything_search', () => {
   let registered = null;
   const ctx = { tools: { register(def) { registered = def; return () => {}; } } };
-  apply(ctx, { esPath: 'D:\\Everything\\es.exe', autoInstall: false });
+  apply(ctx, { esPath: 'D:\\Everything\\es.exe', autoInstall: false, httpPort: 0 });
   assert.equal(registered.name, 'everything_search');
   assert.equal(registered.isConcurrencySafe({}), true);
   assert.deepEqual(registered.parameters.required, ['query']);
@@ -190,7 +214,7 @@ test('apply: registers one tool named everything_search', () => {
 
 test('apply: empty query is rejected before any spawn', async () => {
   let registered = null;
-  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\Everything\\es.exe', autoInstall: false });
+  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\Everything\\es.exe', autoInstall: false, httpPort: 0 });
   // On non-Windows the platform stub answers before argument validation runs.
   const expectedCode = process.platform === 'win32' ? 'ES_INVALID_ARGS' : 'ES_UNSUPPORTED_PLATFORM';
   await assert.rejects(() => registered.execute({ query: '   ' }), (e) => e instanceof EverythingError && e.code === expectedCode);
@@ -198,7 +222,69 @@ test('apply: empty query is rejected before any spawn', async () => {
 
 test('apply: missing es.exe yields ES_NOT_FOUND', { skip: process.platform !== 'win32' }, async () => {
   let registered = null;
-  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\definitely\\missing\\es.exe', autoStart: false, autoInstall: false });
+  apply({ tools: { register(def) { registered = def; return () => {}; } } }, { esPath: 'D:\\definitely\\missing\\es.exe', autoStart: false, autoInstall: false, httpPort: 0 });
   await assert.rejects(() => registered.execute({ query: 'x' }), (e) => e instanceof EverythingError && e.code === 'ES_NOT_FOUND');
+});
+
+test('httpSortParams: maps supported keys, null for HTTP-unsupported ones', () => {
+  assert.deepEqual(httpSortParams(undefined), {});
+  assert.deepEqual(httpSortParams('  '), {});
+  assert.deepEqual(httpSortParams('name'), { sort: 'name', ascending: 1 });
+  assert.deepEqual(httpSortParams('date-modified-descending'), { sort: 'date_modified', ascending: 0 });
+  assert.deepEqual(httpSortParams('size-ascending'), { sort: 'size', ascending: 1 });
+  // date-created / extension / run-count exist on es.exe but not the HTTP server.
+  assert.equal(httpSortParams('date-created-descending'), null);
+  assert.equal(httpSortParams('extension'), null);
+});
+
+test('httpSearchParams: folds scope and type filters into the search text', () => {
+  const params = httpSearchParams({ foldersOnly: true, path: 'D:\\proj ' }, 'tmp', { limit: 25, offset: 50 });
+  assert.equal(params.search, 'folder:tmp path:"D:\\proj"');
+  assert.equal(params.json, '1');
+  assert.equal(params.count, '25');
+  assert.equal(params.offset, '50');
+  assert.equal(params.path_column, '1');
+  assert.equal(params.size_column, '1');
+  assert.equal(params.date_modified_column, '1');
+  assert.equal(params.regex, undefined);
+});
+
+test('httpSearchParams: flags, sort and countOnly', () => {
+  const params = httpSearchParams(
+    { filesOnly: true, regex: true, matchCase: true, wholeWord: true, sort: 'date-modified-descending', countOnly: true },
+    'ab\\.exe',
+    { limit: 10, offset: 0 }
+  );
+  assert.equal(params.search, 'file:ab\\.exe');
+  assert.equal(params.regex, '1');
+  assert.equal(params.case, '1');
+  assert.equal(params.wholeword, '1');
+  assert.equal(params.count, '1'); // countOnly: total comes free with a 1-row page
+  assert.equal(params.sort, 'date_modified');
+  assert.equal(params.ascending, '0');
+});
+
+test('fileTimeToLocalIso: epoch FILETIME, garbage and out-of-range values', () => {
+  // 116444736000000000 == the Unix epoch; render it the way a local Date does.
+  const d = new Date(0);
+  const p = (x) => String(x).padStart(2, '0');
+  const expected = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  assert.equal(fileTimeToLocalIso('116444736000000000'), expected);
+  assert.equal(fileTimeToLocalIso('garbage'), undefined);
+  assert.equal(fileTimeToLocalIso(undefined), undefined);
+  assert.equal(fileTimeToLocalIso('99999999999999999999'), undefined);
+});
+
+test('renderResults: notes are shown and inexact totals render as ≥N', () => {
+  const text = renderResults({
+    query: 'q',
+    total: 100,
+    totalExact: false,
+    truncated: true,
+    results: [{ path: 'D:\\a' }],
+    notes: ['phrase degraded'],
+  });
+  assert.match(text, /≥100/);
+  assert.match(text, /note: phrase degraded/);
 });
 
